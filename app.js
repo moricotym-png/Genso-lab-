@@ -11,7 +11,22 @@
     { id: "use2el",   label: "使い道 → 元素", desc: "10円玉に使われているのは？", kind: "choice" },
     { id: "goro2el",  label: "ゴロ → 元素", desc: "覚え方から当てる", kind: "choice" },
     { id: "num2el",   label: "原子番号", desc: "8番の元素は？", kind: "choice" },
+    { id: "cat",      label: "分類あて", desc: "Na はどの仲間？", kind: "choice" },
+    { id: "ox",       label: "○×クイズ", desc: "「Ag ＝ 金」 は正しい？", kind: "choice" },
     { id: "type",     label: "記号を入力", desc: "キーボードで答える", kind: "type" },
+  ];
+  // ミックス・苦手克服で使う出題形式
+  const MIX_IDS = MODES.map(m => m.id);
+  const SPECIAL = {
+    mix:  { label: "ミックス", desc: "全モードからランダム" },
+    weak: { label: "苦手克服", desc: "まちがえた元素だけ集中" },
+  };
+  const modeLabel = id => (MODES.find(m => m.id === id) || SPECIAL[id] || { label: id }).label;
+
+  // 通算得点でランクアップ
+  const RANKS = [
+    { at: 0, name: "見習い研究生" }, { at: 300, name: "元素ハンター" }, { at: 800, name: "実験助手" },
+    { at: 1600, name: "化学者" }, { at: 3000, name: "元素マイスター" }, { at: 5000, name: "周期表の賢者" },
   ];
 
   // ---------- 保存（この端末のブラウザ内） ----------
@@ -82,16 +97,26 @@
 
   // ---------- クイズ ----------
   let quiz = null;
+  function rankCard() {
+    const pts = totalScore(), { cur, next } = rankOf(pts);
+    const pct = next ? (pts - cur.at) / (next.at - cur.at) * 100 : 100;
+    return `<div class="rank"><div class="rk-top"><span class="rk-name">${cur.name}</span><span class="rk-pts">通算 ${pts} 点</span></div>
+      <div class="q-prog"><span style="width:${pct}%"></span></div>
+      <div class="rk-next">${next ? `次の「${next.name}」まで あと ${next.at - pts} 点` : "最高ランクです"}</div></div>`;
+  }
   function renderQuizHome() {
     quiz = null;
     const best = id => Math.max(0, ...state.history.filter(h => h.mode === id).map(h => h.score));
     $("#quiz-area").innerHTML = `
+      ${rankCard()}
       <p class="lead">モードを選んでください。1回 ${QUESTIONS_PER_ROUND} 問、苦手な元素ほど多く出ます。連続正解でボーナス。</p>
       <div class="modes">${MODES.map(m => `
         <button class="mode" data-mode="${m.id}"><span class="m-label">${m.label}</span>
         <span class="m-desc">${m.desc}</span><span class="m-best">ベスト ${best(m.id)} 点</span></button>`).join("")}
-        <button class="mode mix" data-mode="mix"><span class="m-label">ミックス</span>
-        <span class="m-desc">全モードからランダム</span><span class="m-best">ベスト ${best("mix")} 点</span></button>
+        ${Object.entries(SPECIAL).map(([id, m]) => `
+        <button class="mode mix" data-mode="${id}" ${id === "weak" && !weakList().length ? "disabled" : ""}><span class="m-label">${m.label}</span>
+        <span class="m-desc">${id === "weak" ? (weakList().length ? `苦手・練習中 ${weakList().length} 個から出題` : "まだ苦手な元素はありません") : m.desc}</span>
+        <span class="m-best">ベスト ${best(id)} 点</span></button>`).join("")}
       </div>`;
   }
 
@@ -108,34 +133,70 @@
     }
     return out;
   }
-  function distractors(target, k = 3) {
-    const same = shuffle(E.filter(e => e !== target && e.cat === target.cat));
-    const other = shuffle(E.filter(e => e !== target && e.cat !== target.cat));
+  // ok(e) が false の元素は選択肢に入れない（答えが2つに見える問題を防ぐ）
+  function distractors(target, k = 3, ok = () => true) {
+    const pool = E.filter(e => e !== target && ok(e));
+    const same = shuffle(pool.filter(e => e.cat === target.cat));
+    const other = shuffle(pool.filter(e => e.cat !== target.cat));
     return [...same.slice(0, 2), ...other].slice(0, k);
   }
 
+  // 問題は { el, prompt, sub, opts: [表示文字列], ans: 正解の添字 } で作る
+  function choice(el, list, show, extra) {
+    const opts = shuffle(list);
+    return { el, opts: opts.map(show), ans: opts.indexOf(el), ...extra };
+  }
   function buildQuestion(mode, el) {
-    const opts = shuffle([el, ...distractors(el)]);
     const hideName = s => s.replaceAll(el.name, "○○");
+    const nameSym = o => `${o.name}（${o.s}）`;
     switch (mode) {
-      case "sym2name": return { el, prompt: `<span class="big-sym">${el.s}</span>`, sub: "この記号の元素は？", opts, show: o => o.name };
-      case "name2sym": return { el, prompt: `<span class="big-name">${el.name}</span>`, sub: "元素記号は？", opts, show: o => o.s, mono: true };
+      case "sym2name": return choice(el, [el, ...distractors(el)], o => o.name, { prompt: `<span class="big-sym">${el.s}</span>`, sub: "この記号の元素は？" });
+      case "name2sym": return choice(el, [el, ...distractors(el)], o => o.s, { prompt: `<span class="big-name">${el.name}</span>`, sub: "元素記号は？", mono: true });
       case "use2el": {
-        const u = el.uses[Math.random() * el.uses.length | 0];
-        return { el, prompt: `<span class="q-text">${esc(hideName(u))}</span>`, sub: "に使われている元素は？", opts, show: o => `${o.name}（${o.s}）` };
+        const raw = el.uses[Math.random() * el.uses.length | 0], u = hideName(raw);
+        const ds = distractors(el, 3, d => !raw.includes(d.name) && !d.uses.includes(raw));
+        return choice(el, [el, ...ds], nameSym, { prompt: `<span class="q-text">${esc(u)}</span>`, sub: "に使われている元素は？" });
       }
-      case "goro2el": return { el, prompt: `<span class="q-text">${esc(hideName(el.goro).replaceAll(el.s, "□"))}</span>`, sub: "この覚え方の元素は？", opts, show: o => `${o.name}（${o.s}）` };
-      case "num2el": return { el, prompt: `<span class="big-sym">${el.n}</span>`, sub: "番の元素は？", opts, show: o => `${o.name}（${o.s}）` };
-      case "type": return { el, prompt: `<span class="big-name">${el.name}</span>`, sub: "元素記号を入力", type: true };
+      case "goro2el": {
+        const g = hideName(el.goro).replaceAll(el.s, "□");
+        const ds = distractors(el, 3, d => !el.goro.includes(d.name));
+        return choice(el, [el, ...ds], nameSym, { prompt: `<span class="q-text">${esc(g)}</span>`, sub: "この覚え方の元素は？" });
+      }
+      case "num2el": return choice(el, [el, ...distractors(el)], nameSym, { prompt: `<span class="big-sym">${el.n}</span>`, sub: "番の元素は？" });
+      case "cat": {
+        const keys = Object.keys(CAT).filter(k => k !== el.cat && E.some(e => e.cat === k));
+        const opts = shuffle([el.cat, ...shuffle(keys).slice(0, 3)]);
+        return { el, opts: opts.map(k => CAT[k].label), ans: opts.indexOf(el.cat),
+          prompt: `<span class="big-sym">${el.s}</span><span class="q-name">${el.name}</span>`, sub: "はどの仲間？" };
+      }
+      case "ox": {
+        const truth = Math.random() < 0.5, other = distractors(el, 1)[0];
+        const shown = truth ? el : other;
+        return { el, opts: ["○ 正しい", "× ちがう"], ans: truth ? 0 : 1, ox: true,
+          prompt: `<span class="big-sym">${el.s}</span><span class="q-eq">＝</span><span class="big-name">${shown.name}</span>`, sub: "この組み合わせは正しい？" };
+      }
+      case "type": return { el, prompt: `<span class="big-name">${el.name}</span>`, sub: "元素記号を入力（小文字でもOK）", type: true };
     }
   }
 
+  function totalScore() { return state.history.reduce((s, h) => s + h.score, 0); }
+  function rankOf(pts) {
+    let i = 0; while (i + 1 < RANKS.length && pts >= RANKS[i + 1].at) i++;
+    return { i, cur: RANKS[i], next: RANKS[i + 1] };
+  }
+  const weakList = () => E.filter(e => { const lv = level(e.s); return lv === "weak" || lv === "learning"; });
+
   function startQuiz(modeId) {
-    const ids = MODES.map(m => m.id);
-    const targets = pickTargets(QUESTIONS_PER_ROUND);
+    let targets;
+    if (modeId === "weak") {
+      const weak = new Set(weakList());
+      targets = pickTargets(Math.min(QUESTIONS_PER_ROUND, weak.size), e => weak.has(e));
+      if (targets.length < QUESTIONS_PER_ROUND) targets.push(...pickTargets(QUESTIONS_PER_ROUND - targets.length, e => !weak.has(e)));
+    } else targets = pickTargets(QUESTIONS_PER_ROUND);
+    const random = modeId === "mix" || modeId === "weak";
     quiz = {
-      mode: modeId, i: 0, score: 0, correct: 0, streak: 0, wrong: [],
-      qs: targets.map(el => buildQuestion(modeId === "mix" ? ids[Math.random() * ids.length | 0] : modeId, el)),
+      mode: modeId, i: 0, score: 0, correct: 0, streak: 0, wrong: [], rankBefore: rankOf(totalScore()).i,
+      qs: targets.map(el => buildQuestion(random ? MIX_IDS[Math.random() * MIX_IDS.length | 0] : modeId, el)),
     };
     renderQuestion();
   }
@@ -149,7 +210,7 @@
       <div class="q-card"><div class="q-prompt">${q.prompt}</div><div class="q-sub">${q.sub}</div></div>
       ${q.type
         ? `<form id="type-form" class="type-form"><input id="type-input" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="3" aria-label="元素記号"><button class="btn primary" type="submit">答える</button></form>`
-        : `<div class="opts">${q.opts.map((o, k) => `<button class="opt ${q.mono ? "mono" : ""}" data-k="${k}">${esc(q.show(o))}</button>`).join("")}</div>`}
+        : `<div class="opts ${q.ox ? "ox" : ""}">${q.opts.map((o, k) => `<button class="opt ${q.mono ? "mono" : ""}" data-k="${k}">${esc(o)}</button>`).join("")}</div>`}
       <div id="feedback" class="feedback" hidden></div>
       ${quiz.streak >= 2 ? `<p class="streak">${quiz.streak} 連続正解中</p>` : ""}`;
     if (q.type) $("#type-input").focus();
@@ -165,15 +226,15 @@
     save();
     document.querySelectorAll(".opt").forEach((b, k) => {
       b.disabled = true;
-      if (q.opts && q.opts[k] === el) b.classList.add("right");
+      if (k === q.ans) b.classList.add("right");
     });
     if (chosenBtn && !ok) chosenBtn.classList.add("miss");
     const inp = $("#type-input"); if (inp) inp.disabled = true;
     const fb = $("#feedback");
     fb.className = "feedback " + (ok ? "ok" : "ng");
     fb.innerHTML = `
-      <div class="fb-head">${ok ? `正解！ +${gained}` : `正解は ${el.name}（${el.s}）`}</div>
-      <div class="fb-body"><b>覚え方</b> ${esc(el.goro)}<br><b>身近に</b> ${esc(el.uses.join("、"))}</div>
+      <div class="fb-head">${ok ? `正解！ +${gained}` : `ざんねん… 正解は「${esc(q.type ? el.s : q.opts[q.ans])}」`}</div>
+      <div class="fb-body">${q.ox || q.opts && q.opts[q.ans] !== el.name ? `<b>${el.s}</b> ＝ ${el.name}（${CAT[el.cat].label}）<br>` : ""}<b>覚え方</b> ${esc(el.goro)}<br><b>身近に</b> ${esc(el.uses.join("、"))}</div>
       <button class="btn primary" id="next">${quiz.i + 1 < quiz.qs.length ? "次へ" : "結果を見る"}</button>`;
     fb.hidden = false;
     $("#next").focus();
@@ -184,12 +245,15 @@
     state.history.push({ t: Date.now(), mode: quiz.mode, score: quiz.score, correct: quiz.correct, total: quiz.qs.length });
     save();
     const isBest = quiz.score > prevBest;
+    const rk = rankOf(totalScore()), rankUp = rk.i > quiz.rankBefore;
     const uniqWrong = [...new Set(quiz.wrong)];
     $("#quiz-area").innerHTML = `
       <div class="result">
         <div class="r-score">${quiz.score}<small>点</small></div>
         <div class="r-sub">${quiz.correct} / ${quiz.qs.length} 正解${isBest ? `<span class="badge">自己ベスト更新</span>` : ""}</div>
-        ${uniqWrong.length ? `<h4>復習しよう</h4><div class="mini-grid">${uniqWrong.map(e => tile(e)).join("")}</div>` : `<p class="perfect">全問正解です。</p>`}
+        ${rankUp ? `<p class="rankup">ランクアップ！ 「${rk.cur.name}」になりました</p>` : ""}
+        ${rankCard()}
+        ${uniqWrong.length ? `<h4>復習しよう（タップで覚え方）</h4><div class="mini-grid">${uniqWrong.map(e => tile(e)).join("")}</div>` : `<p class="perfect">全問正解です。</p>`}
         <div class="r-actions"><button class="btn primary" data-mode="${quiz.mode}">もう一度</button>
         <button class="btn" id="back-modes">モード選択へ</button></div>
       </div>`;
@@ -206,7 +270,9 @@
       <div class="stat"><span class="s-val">${h.length}</span><span class="s-lab">プレイ回数</span></div>
       <div class="stat"><span class="s-val">${mastered}<small>/${E.length}</small></span><span class="s-lab">習得した元素</span></div>
       <div class="stat"><span class="s-val">${totalA ? Math.round(totalC / totalA * 100) : 0}<small>%</small></span><span class="s-lab">通算正答率</span></div>
-      <div class="stat"><span class="s-val">${Math.max(0, ...h.map(x => x.score))}</span><span class="s-lab">最高得点</span></div>`;
+      <div class="stat"><span class="s-val">${Math.max(0, ...h.map(x => x.score))}</span><span class="s-lab">最高得点</span></div>
+      <div class="stat"><span class="s-val">${dayStreak()}<small>日</small></span><span class="s-lab">連続学習</span></div>`;
+    $("#rank-slot").innerHTML = rankCard();
     $("#chart-note").textContent = h.length ? `直近 ${Math.min(h.length, 20)} 回の正答率と得点` : "クイズを1回やると、ここにグラフが出ます。";
     drawChart(h.slice(-20));
     const counts = { master: 0, learning: 0, weak: 0, new: 0 };
@@ -215,12 +281,19 @@
       `<span class="lg"><i class="sw lv-${k}"></i>${LEVEL_LABEL[k]} ${counts[k]}</span>`).join("");
     $("#mastery-grid").innerHTML = E.map(e => tile(e, "heat lv-" + level(e.s))).join("");
     $("#history").innerHTML = h.slice(-8).reverse().map(x => {
-      const d = new Date(x.t), md = MODES.find(m => m.id === x.mode);
+      const d = new Date(x.t);
       return `<li><span>${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}</span>
-        <span>${md ? md.label : "ミックス"}</span><span class="num">${x.correct}/${x.total}</span><span class="num">${x.score}点</span></li>`;
+        <span>${modeLabel(x.mode)}</span><span class="num">${x.correct}/${x.total}</span><span class="num">${x.score}点</span></li>`;
     }).join("") || `<li class="empty">まだ記録がありません</li>`;
   }
 
+  // 今日（または昨日）までクイズを続けた日数
+  function dayStreak() {
+    const days = new Set(state.history.map(h => new Date(h.t).toDateString()));
+    const d = new Date(); if (!days.has(d.toDateString())) d.setDate(d.getDate() - 1);
+    let n = 0; while (days.has(d.toDateString())) { n++; d.setDate(d.getDate() - 1); }
+    return n;
+  }
   function drawChart(data) {
     const cv = $("#chart"), ctx = cv.getContext("2d");
     const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = 200;
@@ -259,7 +332,7 @@
     if (t.dataset.mode) return startQuiz(t.dataset.mode);
     if (t.classList.contains("chip")) { filter = t.dataset.cat; return renderLearn(); }
     if (t.classList.contains("tile")) return openDetail(t.dataset.sym);
-    if (t.classList.contains("opt") && quiz) { const q = quiz.qs[quiz.i]; return answer(q.opts[+t.dataset.k] === q.el, t); }
+    if (t.classList.contains("opt") && quiz) return answer(+t.dataset.k === quiz.qs[quiz.i].ans, t);
     if (t.id === "next") { quiz.i++; return quiz.i < quiz.qs.length ? renderQuestion() : finish(); }
     if (t.id === "back-modes") return renderQuizHome();
     if (t.id === "detail-close") return ($("#detail").hidden = true);
