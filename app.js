@@ -63,9 +63,34 @@
   }
   const LEVEL_LABEL = { new: "まだ", weak: "苦手", learning: "練習中", master: "習得" };
 
-  function tile(el, extra = "") {
-    return `<button class="tile ${extra}" data-sym="${el.s}" style="--cat:${catColor(el.cat)}" aria-label="${el.name} ${el.s}">
+  function tile(el, extra = "", style = "") {
+    return `<button class="tile ${extra}" data-sym="${el.s}" style="--cat:${catColor(el.cat)};${style}" aria-label="${el.name} ${el.s}">
       <span class="t-num">${el.n}</span><span class="t-sym">${el.s}</span><span class="t-name">${el.name}</span></button>`;
+  }
+
+  // ---------- 周期表の並び ----------
+  // 原子番号から [列(族 1〜18), 行] を求める。行 1〜7 が周期、9・10 行目がランタノイド・アクチノイド
+  function cell(n) {
+    if (n === 1) return [1, 1];
+    if (n === 2) return [18, 1];
+    const starts = [[3, 2], [11, 3], [19, 4], [37, 5], [55, 6], [87, 7]];
+    let [s, p] = starts[0];
+    for (const st of starts) if (n >= st[0]) [s, p] = st;
+    const i = n - s;
+    if (p <= 3) return [i < 2 ? i + 1 : i + 11, p];
+    if (p <= 5) return [i + 1, p];
+    if (i < 2) return [i + 1, p];
+    if (i <= 16) return [i + 1, p === 6 ? 9 : 10];   // 57〜71 / 89〜103 は下の2段
+    return [i - 13, p];
+  }
+  // tileOf(el) → [追加クラス]。dim(el) が true の元素はうすく表示
+  function periodicTable(extraOf, dim = () => false) {
+    const pos = (c, r) => `grid-column:${c};grid-row:${r}`;
+    const head = Array.from({ length: 18 }, (_, k) => `<span class="pt-g" style="${pos(k + 1, "auto")};grid-row:1">${k + 1}</span>`).join("");
+    const tiles = E.map(el => { const [c, r] = cell(el.n); return tile(el, extraOf(el) + (dim(el) ? " dim" : ""), pos(c, r + 1)); }).join("");
+    const ph = [[7, "57–71", "lanthanide"], [8, "89–103", "actinide"]].map(([r, t, k]) =>
+      `<span class="pt-ph" style="${pos(3, r)};--cat:${catColor(k)}">${t}</span>`).join("");
+    return `<div class="pt-scroll"><div class="ptable">${head}${tiles}${ph}<span class="pt-gap" style="grid-row:9"></span></div></div>`;
   }
 
   // ---------- タブ ----------
@@ -87,8 +112,8 @@
     const cats = ["all", "basic", ...Object.keys(CAT).filter(k => E.some(e => e.cat === k))];
     $("#chips").innerHTML = cats.map(k => `<button class="chip" aria-pressed="${filter === k}" data-cat="${k}"
       ${CAT[k] ? `style="--cat:${catColor(k)}"` : ""}>${k === "all" ? "すべて" : k === "basic" ? "よく出る" : CAT[k].label}</button>`).join("");
-    $("#grid").innerHTML = E.filter(e => filter === "all" || (filter === "basic" ? BASIC.has(e.n) : e.cat === filter))
-      .map(e => tile(e, "lv-" + level(e.s))).join("");
+    const show = e => filter === "all" || (filter === "basic" ? BASIC.has(e.n) : e.cat === filter);
+    $("#grid").innerHTML = periodicTable(e => "lv-" + level(e.s), e => !show(e));
   }
   function openDetail(sym) {
     const el = E.find(e => e.s === sym); if (!el) return;
@@ -294,7 +319,7 @@
     E.forEach(e => counts[level(e.s)]++);
     $("#legend").innerHTML = ["master", "learning", "weak", "new"].map(k =>
       `<span class="lg"><i class="sw lv-${k}"></i>${LEVEL_LABEL[k]} ${counts[k]}</span>`).join("");
-    $("#mastery-grid").innerHTML = E.map(e => tile(e, "heat lv-" + level(e.s))).join("");
+    $("#mastery-grid").innerHTML = periodicTable(e => "heat lv-" + level(e.s));
     $("#history").innerHTML = h.slice(-8).reverse().map(x => {
       const d = new Date(x.t);
       return `<li><span>${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}</span>

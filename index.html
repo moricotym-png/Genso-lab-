@@ -159,7 +159,24 @@ h4 { font-size: 12px; letter-spacing: .08em; color: var(--muted); margin: 16px 0
 .sw.lv-weak, .tile.heat.lv-weak { background: var(--lv-weak); }
 .sw.lv-learning, .tile.heat.lv-learning { background: var(--lv-learning); }
 .sw.lv-master, .tile.heat.lv-master { background: var(--lv-master); }
-#mastery-grid { grid-template-columns: repeat(auto-fill, minmax(48px, 1fr)); gap: 4px; }
+/* 周期表（スマホでは横スクロール） */
+.pt-scroll { overflow-x: auto; margin-inline: -4px; padding: 4px 4px 8px; -webkit-overflow-scrolling: touch; }
+.ptable { display: grid; grid-template-columns: repeat(18, minmax(36px, 1fr)); gap: 3px; min-width: 680px; }
+.ptable .tile { aspect-ratio: auto; height: 46px; padding: 0; border-top-width: 4px; border-radius: 4px; justify-content: flex-end; padding-bottom: 5px; }
+.ptable .t-num { top: 1px; left: 3px; font-size: 9px; }
+.ptable .t-sym { font-size: 16px; }
+.ptable .t-name { display: none; }
+.ptable .tile::after { content: ""; position: absolute; right: 3px; top: 3px; width: 5px; height: 5px; border-radius: 50%; background: var(--lv-new); }
+.ptable .tile.lv-master::after { background: var(--ok); }
+.ptable .tile.lv-weak::after { background: var(--ng); }
+.ptable .tile.lv-learning::after { background: var(--c-halogen); }
+.ptable .tile.heat::after { display: none; }
+.ptable .tile.dim { opacity: .2; }
+.pt-g { font-family: var(--f-mono); font-size: 10px; color: var(--muted); text-align: center; }
+.pt-ph { display: grid; place-items: center; font-family: var(--f-mono); font-size: 9px; color: var(--muted); border: 1px dashed var(--line); border-top: 4px solid var(--cat); border-radius: 4px; height: 46px; }
+.pt-gap { height: 8px; grid-column: 1 / -1; }
+.pt-hint { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+@media (min-width: 740px) { .pt-hint { display: none; } }
 .tile.heat .t-sym { font-size: 17px; } .tile.heat .t-name { display: none; }
 .history { list-style: none; padding: 0; margin: 0; }
 .history li { display: grid; grid-template-columns: 1fr 1.3fr auto auto; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
@@ -190,9 +207,10 @@ h4 { font-size: 12px; letter-spacing: .08em; color: var(--muted); margin: 16px 0
     <h2>並びで覚えるゴロ</h2>
     <div class="groups" id="groups"></div>
     <h2>元素カード</h2>
-    <p class="lead">タップすると覚え方と身近な使い道が出ます。右上の点はクイズでの習得度です。</p>
+    <p class="lead">周期表と同じ並びです。タップすると覚え方と身近な使い道が出ます。右上の点はクイズでの習得度です。</p>
     <div class="chips" id="chips"></div>
-    <div class="grid" id="grid"></div>
+    <div id="grid"></div>
+    <p class="pt-hint">表は横にスクロールできます</p>
   </section>
 
   <section class="view" id="view-quiz" hidden>
@@ -211,7 +229,7 @@ h4 { font-size: 12px; letter-spacing: .08em; color: var(--muted); margin: 16px 0
     </div>
     <h2>習得マップ</h2>
     <div class="legend" id="legend"></div>
-    <div class="grid" id="mastery-grid"></div>
+    <div id="mastery-grid"></div>
     <h2>最近のプレイ</h2>
     <ul class="history" id="history"></ul>
     <div class="reset">記録はこの端末のブラウザに保存されます。
@@ -229,5 +247,5 @@ h4 { font-size: 12px; letter-spacing: .08em; color: var(--muted); margin: 16px 0
   </div>
 </div>
 
-<script src="elements.js?v=4"></script>
-<script src="app.js?v=4"></script>
+<script src="elements.js?v=5"></script>
+<script src="app.js?v=5"></script>

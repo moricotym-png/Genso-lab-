@@ -17,6 +17,7 @@
 | 1回の問題数を変える | `app.js` の `QUESTIONS_PER_ROUND` |
 | 得点ルール（連続ボーナス等） | `app.js` の `answer()` |
 | 習得の判定基準 | `app.js` の `level()` |
+| 周期表の並び・マスの大きさ | `app.js` の `cell()` `periodicTable()`、`index.html` の `.ptable` |
 | ランク名・必要点数 | `app.js` の `RANKS` |
 | 色・フォント | `index.html` の `:root`（白背景で固定。`<html data-theme="light">` を外すとダーク対応が復活。dark 用2ブロックもそろえておく） |
 | クイズの出題範囲（初期値は全118） | `app.js` の `RANGES`、「よく出る元素」は `elements.js` の `BASIC` |
