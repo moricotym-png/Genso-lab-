@@ -11,7 +11,7 @@
 ## よくある編集と触る場所
 | やりたいこと | 場所 |
 |---|---|
-| 元素を追加・ゴロや使い道を直す | `elements.js` の `ELEMENTS` に1行追加/編集 |
+| 元素を追加・ゴロや使い道を直す | `elements.js` の `ELEMENTS` に1行追加/編集（公開後は index.html の `?v=` の数字も上げる＝キャッシュ対策） |
 | 並びのゴロを追加（37〜54番など） | `elements.js` の `GROUP_GORO` |
 | 新しいクイズ形式を追加 | `app.js` の `MODES` に追加し、`buildQuestion()` に case を足す（戻り値は `opts` 文字列配列と正解の添字 `ans`） |
 | 1回の問題数を変える | `app.js` の `QUESTIONS_PER_ROUND` |
@@ -19,7 +19,7 @@
 | 習得の判定基準 | `app.js` の `level()` |
 | ランク名・必要点数 | `app.js` の `RANKS` |
 | 色・フォント | `index.html` の `:root`（白背景で固定。`<html data-theme="light">` を外すとダーク対応が復活。dark 用2ブロックもそろえておく） |
-| クイズの出題範囲 | `app.js` の `RANGES`、「よく出る元素」は `elements.js` の `BASIC` |
+| クイズの出題範囲（初期値は全118） | `app.js` の `RANGES`、「よく出る元素」は `elements.js` の `BASIC` |
 
 ## データの形
 ```js

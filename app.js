@@ -9,8 +9,8 @@
     { id: "all",   label: "全118",       f: () => true },
   ];
   const RANGE_KEY = "genso-lab-range";
-  let rangeId = (() => { try { return localStorage.getItem(RANGE_KEY) || "basic"; } catch (e) { return "basic"; } })();
-  const inRange = e => (RANGES.find(r => r.id === rangeId) || RANGES[1]).f(e);
+  let rangeId = (() => { try { return localStorage.getItem(RANGE_KEY) || "all"; } catch (e) { return "all"; } })();
+  const inRange = e => (RANGES.find(r => r.id === rangeId) || RANGES[3]).f(e);
   const usesText = el => el.uses.length ? el.uses.join("、") : el.note || "研究用";
   const QUESTIONS_PER_ROUND = 10;
   const STORE_KEY = "genso-lab-v1";
