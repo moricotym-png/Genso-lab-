@@ -1,6 +1,17 @@
 // ===== 元素ラボ アプリ本体 =====
 (function () {
-  const E = window.ELEMENTS, CAT = window.CATEGORIES, GROUPS = window.GROUP_GORO;
+  const E = window.ELEMENTS, CAT = window.CATEGORIES, GROUPS = window.GROUP_GORO, BASIC = new Set(window.BASIC);
+  // クイズの出題範囲（選択はこの端末に保存）
+  const RANGES = [
+    { id: "20",    label: "1〜20番",     f: e => e.n <= 20 },
+    { id: "basic", label: "よく出る元素", f: e => BASIC.has(e.n) },
+    { id: "86",    label: "1〜86番",     f: e => e.n <= 86 },
+    { id: "all",   label: "全118",       f: () => true },
+  ];
+  const RANGE_KEY = "genso-lab-range";
+  let rangeId = (() => { try { return localStorage.getItem(RANGE_KEY) || "basic"; } catch (e) { return "basic"; } })();
+  const inRange = e => (RANGES.find(r => r.id === rangeId) || RANGES[1]).f(e);
+  const usesText = el => el.uses.length ? el.uses.join("、") : el.note || "研究用";
   const QUESTIONS_PER_ROUND = 10;
   const STORE_KEY = "genso-lab-v1";
 
@@ -73,10 +84,10 @@
     $("#groups").innerHTML = GROUPS.map(g => `
       <div class="group"><div class="g-range">${g.range}</div>
       <div class="g-goro">${esc(g.goro)}</div><div class="g-sym">${g.symbols}</div></div>`).join("");
-    const cats = ["all", ...Object.keys(CAT).filter(k => E.some(e => e.cat === k))];
+    const cats = ["all", "basic", ...Object.keys(CAT).filter(k => E.some(e => e.cat === k))];
     $("#chips").innerHTML = cats.map(k => `<button class="chip" aria-pressed="${filter === k}" data-cat="${k}"
-      ${k !== "all" ? `style="--cat:${catColor(k)}"` : ""}>${k === "all" ? "すべて" : CAT[k].label}</button>`).join("");
-    $("#grid").innerHTML = E.filter(e => filter === "all" || e.cat === filter)
+      ${CAT[k] ? `style="--cat:${catColor(k)}"` : ""}>${k === "all" ? "すべて" : k === "basic" ? "よく出る" : CAT[k].label}</button>`).join("");
+    $("#grid").innerHTML = E.filter(e => filter === "all" || (filter === "basic" ? BASIC.has(e.n) : e.cat === filter))
       .map(e => tile(e, "lv-" + level(e.s))).join("");
   }
   function openDetail(sym) {
@@ -89,7 +100,8 @@
       </div>
       <h4>覚え方</h4><p class="d-goro">${esc(el.goro)}</p>
       ${el.origin ? `<h4>記号の由来</h4><p>${esc(el.origin)}</p>` : ""}
-      <h4>身近なところで</h4><ul>${el.uses.map(u => `<li>${esc(u)}</li>`).join("")}</ul>
+      ${el.uses.length ? `<h4>身近なところで</h4><ul>${el.uses.map(u => `<li>${esc(u)}</li>`).join("")}</ul>` : ""}
+      ${el.note ? `<h4>メモ</h4><p>${esc(el.note)}</p>` : ""}
       <p class="d-stat">クイズ成績：${m.a ? `${m.c}/${m.a} 正解（${LEVEL_LABEL[level(sym)]}）` : "まだ出題されていません"}</p>`;
     $("#detail").hidden = false;
     $("#detail-close").focus();
@@ -109,6 +121,7 @@
     const best = id => Math.max(0, ...state.history.filter(h => h.mode === id).map(h => h.score));
     $("#quiz-area").innerHTML = `
       ${rankCard()}
+      <h4>出題範囲</h4><div class="chips">${RANGES.map(r => `<button class="chip range" aria-pressed="${r.id === rangeId}" data-range="${r.id}">${r.label}<small> ${E.filter(r.f).length}</small></button>`).join("")}</div>
       <p class="lead">モードを選んでください。1回 ${QUESTIONS_PER_ROUND} 問、苦手な元素ほど多く出ます。連続正解でボーナス。</p>
       <div class="modes">${MODES.map(m => `
         <button class="mode" data-mode="${m.id}"><span class="m-label">${m.label}</span>
@@ -135,7 +148,8 @@
   }
   // ok(e) が false の元素は選択肢に入れない（答えが2つに見える問題を防ぐ）
   function distractors(target, k = 3, ok = () => true) {
-    const pool = E.filter(e => e !== target && ok(e));
+    let pool = E.filter(e => e !== target && ok(e) && inRange(e));
+    if (pool.length < k) pool = E.filter(e => e !== target && ok(e));
     const same = shuffle(pool.filter(e => e.cat === target.cat));
     const other = shuffle(pool.filter(e => e.cat !== target.cat));
     return [...same.slice(0, 2), ...other].slice(0, k);
@@ -153,6 +167,7 @@
       case "sym2name": return choice(el, [el, ...distractors(el)], o => o.name, { prompt: `<span class="big-sym">${el.s}</span>`, sub: "この記号の元素は？" });
       case "name2sym": return choice(el, [el, ...distractors(el)], o => o.s, { prompt: `<span class="big-name">${el.name}</span>`, sub: "元素記号は？", mono: true });
       case "use2el": {
+        if (!el.uses.length) return buildQuestion("name2sym", el);
         const raw = el.uses[Math.random() * el.uses.length | 0], u = hideName(raw);
         const ds = distractors(el, 3, d => !raw.includes(d.name) && !d.uses.includes(raw));
         return choice(el, [el, ...ds], nameSym, { prompt: `<span class="q-text">${esc(u)}</span>`, sub: "に使われている元素は？" });
@@ -192,7 +207,7 @@
       const weak = new Set(weakList());
       targets = pickTargets(Math.min(QUESTIONS_PER_ROUND, weak.size), e => weak.has(e));
       if (targets.length < QUESTIONS_PER_ROUND) targets.push(...pickTargets(QUESTIONS_PER_ROUND - targets.length, e => !weak.has(e)));
-    } else targets = pickTargets(QUESTIONS_PER_ROUND);
+    } else targets = pickTargets(QUESTIONS_PER_ROUND, inRange);
     const random = modeId === "mix" || modeId === "weak";
     quiz = {
       mode: modeId, i: 0, score: 0, correct: 0, streak: 0, wrong: [], rankBefore: rankOf(totalScore()).i,
@@ -234,7 +249,7 @@
     fb.className = "feedback " + (ok ? "ok" : "ng");
     fb.innerHTML = `
       <div class="fb-head">${ok ? `正解！ +${gained}` : `ざんねん… 正解は「${esc(q.type ? el.s : q.opts[q.ans])}」`}</div>
-      <div class="fb-body">${q.ox || q.opts && q.opts[q.ans] !== el.name ? `<b>${el.s}</b> ＝ ${el.name}（${CAT[el.cat].label}）<br>` : ""}<b>覚え方</b> ${esc(el.goro)}<br><b>身近に</b> ${esc(el.uses.join("、"))}</div>
+      <div class="fb-body">${q.ox || q.opts && q.opts[q.ans] !== el.name ? `<b>${el.s}</b> ＝ ${el.name}（${CAT[el.cat].label}）<br>` : ""}<b>覚え方</b> ${esc(el.goro)}<br><b>${el.uses.length ? "身近に" : "メモ"}</b> ${esc(usesText(el))}</div>
       <button class="btn primary" id="next">${quiz.i + 1 < quiz.qs.length ? "次へ" : "結果を見る"}</button>`;
     fb.hidden = false;
     $("#next").focus();
@@ -330,6 +345,7 @@
     const t = e.target.closest("button"); if (!t) return;
     if (t.classList.contains("tab")) return showTab(t.dataset.tab);
     if (t.dataset.mode) return startQuiz(t.dataset.mode);
+    if (t.dataset.range) { rangeId = t.dataset.range; try { localStorage.setItem(RANGE_KEY, rangeId); } catch (e) {} return renderQuizHome(); }
     if (t.classList.contains("chip")) { filter = t.dataset.cat; return renderLearn(); }
     if (t.classList.contains("tile")) return openDetail(t.dataset.sym);
     if (t.classList.contains("opt") && quiz) return answer(+t.dataset.k === quiz.qs[quiz.i].ans, t);

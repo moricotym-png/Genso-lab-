@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja">
+<html lang="ja" data-theme="light">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>元素ラボ</title>
@@ -9,7 +9,7 @@
 <style>
 /* レイアウト: 周期表のマス目をモチーフにした1カラムのアプリ。上部タブで 学ぶ / クイズ / 成長 を切替 */
 :root {
-  --bg: #eef1f6; --surface: #ffffff; --fg: #17203a; --muted: #5d6785; --line: #d6dbe7;
+  --bg: #ffffff; --surface: #ffffff; --fg: #17203a; --muted: #5d6785; --line: #d3d9e4;
   --accent: #3047d6; --accent-soft: rgba(48, 71, 214, .16); --on-accent: #ffffff;
   --ok: #138a52; --ok-bg: #e2f5ea; --ng: #c23a3a; --ng-bg: #fbe8e8;
   --c-alkali: #e5484d; --c-alkaline: #f08a24; --c-transition: #3e7be0; --c-post: #7b8aa8;
@@ -72,6 +72,7 @@ h4 { font-size: 12px; letter-spacing: .08em; color: var(--muted); margin: 16px 0
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .chip { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 4px 12px; font-size: 13px; }
 .chip[style] { border-left: 6px solid var(--cat); }
+.chip small { color: inherit; opacity: .7; }
 .chip[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 
 /* 詳細シート */
