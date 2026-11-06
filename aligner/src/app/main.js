@@ -22,6 +22,8 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
+export const APP_VERSION = 'v0.3（自動位置合わせ対応）';
+$('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
 const S = {
@@ -1305,5 +1307,5 @@ setSegJaw('upper');
 loadSetupForm();
 updatePoses();
 renderCephTable();
-log('準備完了。「1 取込」でデータを読み込むか、デモ症例を試してください。');
+log(`準備完了（${APP_VERSION}）。「1 取込」でデータを読み込むか、デモ症例を試してください。`);
 window.__S = S; // デバッグ用
