@@ -116,17 +116,22 @@
       <label class="btn file">DICOM フォルダを選ぶ<input type="file" id="fileDicomDir" webkitdirectory multiple></label>
       <label class="btn file">DICOM ファイルを選ぶ（複数可）<input type="file" id="fileDicom" multiple></label>
       <div class="status" id="statusCT">未読込</div>
-      <p class="note">非圧縮の DICOM に対応。大きいボリュームは自動で間引きます。</p>
+      <p class="note">非圧縮の DICOM に対応。大きいボリュームは自動で間引きます。読み込むと歯の立体表示と、スキャンとの自動位置合わせを行います（先にスキャンを読み込んでおいてください）。</p>
       <h2>フェイススキャン（OBJ）</h2>
       <label class="btn file">OBJ を選ぶ<input type="file" id="fileFace" accept=".obj"></label>
-      <label class="btn file">テクスチャ画像（任意）<input type="file" id="fileFaceTex" accept="image/*"></label>
+      <label class="btn file">テクスチャ画像（任意・先に選んでも可）<input type="file" id="fileFaceTex" accept="image/*"></label>
       <div class="status" id="statusFace">未読込</div>
       <h2>デモ</h2>
       <button id="loadDemo">デモ症例を読み込む（合成データ）</button>
+      <button id="loadDemoCT">デモ CBCT を読み込む（合成）</button>
       <p class="note">実データがなくても、分割 → セットアップ → ステージング → 出力までを試せます。</p>
     </section>
 
     <section class="step" id="step-register">
+      <h2>自動位置合わせ</h2>
+      <p class="note">CBCT を読み込むと、歯の立体表示と「スキャン ⇄ CBCT」の位置合わせを自動で行います。顔スキャンは CBCT の皮膚表面と自動で合わせます。やり直すときは下のボタン。</p>
+      <div class="row"><button id="autoRegScan" class="primary">スキャン ⇄ CBCT</button><button id="autoRegFace" class="primary">顔 ⇄ CBCT</button></div>
+      <div class="status" id="regResult"></div>
       <h2>CBCT の等値面</h2>
       <div class="row"><label>しきい値 (HU)</label><input type="number" id="isoThr" value="1200" step="50"></div>
       <div class="row"><label>間引き</label><select id="isoStep"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
@@ -136,7 +141,7 @@
       <div class="row"><label>冠状</label><input type="range" id="sliceY" min="0" max="1" step="0.001" value="0.5"></div>
       <div class="row"><label>矢状</label><input type="range" id="sliceX" min="0" max="1" step="0.001" value="0.5"></div>
       <div class="row"><label>WL / WW</label><input type="number" id="winL" value="800" step="50"><input type="number" id="winW" value="3000" step="100"></div>
-      <h2>対応点による位置合わせ（基準＝口腔内スキャン）</h2>
+      <h2>手動：対応点による位置合わせ（自動でずれたとき）</h2>
       <div class="row"><label>動かすデータ</label><select id="regTarget"><option value="cbct">CBCT</option><option value="face">フェイススキャン</option></select></div>
       <div class="row">
         <button id="pickMoving">① 動かす側の点を打つ</button>
@@ -145,7 +150,6 @@
       <div class="status" id="regStatus">点: 0 / 0（3点以上、同じ順番で）</div>
       <div class="row"><button id="regClear">点をクリア</button><button id="regSolve" class="primary">位置合わせ</button></div>
       <div class="row"><button id="regICP">ICP で微調整（CBCT 等値面 ⇄ スキャン）</button></div>
-      <div class="status" id="regResult"></div>
       <p class="note">例：左右の犬歯尖頭・中切歯切縁・大臼歯の頬側咬頭など、両方のデータで見える点を同じ順で選びます。</p>
       <h2>表示</h2>
       <div class="row"><label>顔の透明度</label><input type="range" id="faceOpacity" min="0" max="1" step="0.05" value="0.6"></div>

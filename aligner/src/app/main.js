@@ -6,7 +6,8 @@ import { parseSTL, writeSTL } from '../io/stl.js';
 import { parseOBJ } from '../io/obj.js';
 import { parseDicomFile, buildVolume, volumeMatrix, sampleVolume } from '../io/dicom.js';
 import { makeZip, readZip } from '../io/zip.js';
-import { rigidFromPairs, rmsError, icp } from '../geom/register.js';
+import { rigidFromPairs, rmsError, icp, autoRegister } from '../geom/register.js';
+import { volumeThresholds } from '../geom/volstats.js';
 import { segmentTeeth, paintLabels } from '../geom/segment.js';
 import { volumeIsosurface } from '../geom/isosurface.js';
 import { poseMatrix, matrixToPose, attachmentMesh, buccalAnchor } from '../geom/tooth.js';
@@ -15,7 +16,7 @@ import { archOrder, toothInfo, POSE_KEYS, POSE_LABELS, zeroPose, DEFAULT_LIMITS,
 import { CEPH_LANDMARKS, CEPH_MEASURES, DEFAULT_TARGETS, measureCeph, cephToToothGoals } from '../plan/ceph.js';
 import { autoSetup, DEFAULT_SETUP, overjetOverbite } from '../plan/setup.js';
 import { autoStage, poseAt, posesAt, setKey, checkVelocities, stagingTable, contactReport, STRATEGIES, stagesNeeded } from '../plan/staging.js';
-import { makeDemoJaw, DEMO_CEPH_POINTS } from '../demo/demoCase.js';
+import { makeDemoJaw, makeDemoCBCT, DEMO_CEPH_POINTS } from '../demo/demoCase.js';
 
 const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
@@ -150,7 +151,7 @@ function updateScanStatus() {
 $('fileUpper').onchange = (e) => e.target.files[0] && withBusy('STL 読込中…', async () => { await loadScan('upper', await readFile(e.target.files[0]), e.target.files[0].name); viewer.fit(); });
 $('fileLower').onchange = (e) => e.target.files[0] && withBusy('STL 読込中…', async () => { await loadScan('lower', await readFile(e.target.files[0]), e.target.files[0].name); viewer.fit(); });
 
-async function loadDicomFiles(files) {
+async function loadDicomFiles(files, { autoAlign = true } = {}) {
   const list = [...files].filter((f) => !/\.(txt|xml|jpg|png|html?)$/i.test(f.name));
   const slices = [];
   let fails = 0, firstErr = null;
@@ -160,7 +161,9 @@ async function loadDicomFiles(files) {
   }
   if (!slices.length) throw firstErr || new Error('画像を含む DICOM が見つかりません');
   busy(true, 'ボリューム構築中…', 0.9); await tick();
-  const vol = buildVolume(slices);
+  await setVolume(buildVolume(slices), { autoAlign, fails });
+}
+async function setVolume(vol, { autoAlign = true, fails = 0 } = {}) {
   const Mv = volumeMatrix(vol);
   // 初期配置：CBCT の中心をスキャンの中心へ
   const c = mApply(Mv, vol.dims.map((d) => (d - 1) / 2));
@@ -168,9 +171,121 @@ async function loadDicomFiles(files) {
   S.cbct = { vol, M: mTranslate(sub(sc, c)), iso: null, slice: [0.5, 0.5, 0.5] };
   $('statusCT').textContent = `${vol.dims.join('×')} ボクセル, ${vol.spacing.map((s) => s.toFixed(2)).join('×')} mm${vol.info.downsample > 1 ? `（1/${vol.info.downsample} に間引き）` : ''}${fails ? `, 読めないファイル ${fails}` : ''}`;
   log(`CBCT 読込: ${vol.info.slices} スライス`);
-  setVis('slices', true);
+  // しきい値を自動で決めて、歯の等値面（立体）を表示
+  const th = volumeThresholds(vol);
+  S.cbct.thr = th;
+  $('isoThr').value = Math.round(th.teeth);
+  busy(true, 'CBCT の立体表示を作成中…', 0.95); await tick();
+  buildIso();
+  setVis('slices', false);
+  setVis('iso', true);
   drawSlices();
+  log(`しきい値（自動）: 歯 ${Math.round(th.teeth)} / 骨 ${Math.round(th.bone)} / 皮膚 ${Math.round(th.skin)}`);
+  if (autoAlign && (S.scans.upper || S.scans.lower)) await autoAlignScanCbct();
+  if (autoAlign && S.face) await autoAlignFace();
+  viewer.fit();
 }
+function buildIso() {
+  const vol = S.cbct.vol, Mv = volumeMatrix(vol);
+  const n = vol.dims[0] * vol.dims[1] * vol.dims[2];
+  const step = n > 24e6 ? 2 : 1;
+  $('isoStep').value = String(step);
+  S.cbct.iso = volumeIsosurface(vol, num('isoThr'), step, (i, j, k) => mApply(Mv, [i, j, k]));
+  drawIso();
+  log(`CBCT 等値面: ${S.cbct.iso.nf.toLocaleString()} 面（しきい値 ${num('isoThr')}）`);
+}
+
+// ---- 自動位置合わせ ----
+const avg = (pts) => scale(pts.reduce((a, b) => add(a, b), [0, 0, 0]), 1 / pts.length);
+function meshCentroid(m) { const P = m.positions; let c = [0, 0, 0]; for (let i = 0; i < P.length; i += 3) { c[0] += P[i]; c[1] += P[i + 1]; c[2] += P[i + 2]; } return scale(c, 3 / P.length); }
+function meanNormal(m) { const N = m.vertexNormals(); let c = [0, 0, 0]; for (let i = 0; i < N.length; i += 3) { c[0] += N[i]; c[1] += N[i + 1]; c[2] += N[i + 2]; } return norm(c); }
+/** スキャン座標での「上（頭側）」方向 */
+function scanUp() {
+  if (S.scans.upper && S.scans.lower) return norm(sub(meshCentroid(S.scans.upper), meshCentroid(S.scans.lower)));
+  if (S.arches.lower) return S.arches.lower.frame.ez;
+  if (S.arches.upper) return scale(S.arches.upper.frame.ez, -1);
+  if (S.scans.lower) return meanNormal(S.scans.lower);
+  return scale(meanNormal(S.scans.upper), -1);
+}
+/** 位置合わせに使う歯冠の点（分割済みなら歯のラベル、未分割なら咬合側の 45%） */
+function crownPoints(up) {
+  const out = [];
+  for (const j of JAWS) {
+    const m = S.scans[j];
+    if (!m) continue;
+    const P = m.positions, L = S.labels[j];
+    const occl = j === 'lower' ? up : scale(up, -1);
+    let cut = -Infinity;
+    if (!L) {
+      const hs = [];
+      for (let i = 0; i < P.length; i += 30) hs.push(P[i] * occl[0] + P[i + 1] * occl[1] + P[i + 2] * occl[2]);
+      hs.sort((a, b) => a - b);
+      cut = hs[Math.floor(hs.length * 0.55)];
+    }
+    for (let i = 0; i < P.length / 3; i++) {
+      if (L ? L[i] <= 0 : P[3 * i] * occl[0] + P[3 * i + 1] * occl[1] + P[3 * i + 2] * occl[2] < cut) continue;
+      out.push(P[3 * i], P[3 * i + 1], P[3 * i + 2]);
+    }
+  }
+  return Float32Array.from(out);
+}
+async function autoAlignScanCbct() {
+  if (!S.cbct?.iso) return;
+  busy(true, 'スキャン ⇄ CBCT を自動で位置合わせ中…（数十秒かかることがあります）'); await tick();
+  const up = scanUp();
+  const r = autoRegister(crownPoints(up), S.cbct.iso.positions, { upSrc: up, upDst: [0, 0, 1], shifts: [-8, -4, 0, 4, 8] });
+  if (!r) { log('自動位置合わせに失敗しました。対応点で合わせてください', 'warn'); return; }
+  const newM = mInvRigid(r.matrix); // CBCT → スキャン
+  if (S.face?.alignedToCbct) { S.face.M = mMul(newM, mMul(mInvRigid(S.cbct.M), S.face.M)); drawFace(); }
+  S.cbct.M = newM;
+  drawIso(); drawSlices();
+  const msg = `スキャン⇄CBCT 自動位置合わせ: 一致率 ${(r.inlier * 100).toFixed(0)}%（0.5mm 以内）, 誤差 ${r.rms.toFixed(2)} mm`;
+  $('regResult').textContent = msg;
+  if (r.inlier < 0.35) {
+    log(`${msg}。一致率が低いため結果を確認してください（ずれていれば「2 位置合わせ」で対応点を打つか、しきい値を変えて再実行）`, 'warn');
+  } else log(msg, 'ok');
+}
+/** 顔スキャンの単位を mm にそろえる（m や cm で書き出された場合） */
+function faceToMM(obj) {
+  const P = obj.positions;
+  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < P.length; i += 3) for (let k = 0; k < 3; k++) { mn[k] = Math.min(mn[k], P[i + k]); mx[k] = Math.max(mx[k], P[i + k]); }
+  const diag = Math.hypot(mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]);
+  const f = diag < 2 ? 1000 : diag < 40 ? 10 : 1;
+  if (f !== 1) { for (let i = 0; i < P.length; i++) P[i] *= f; log(`顔スキャンの単位を mm に変換しました（×${f}）`); }
+}
+async function autoAlignFace() {
+  if (!S.face) return;
+  if (!S.cbct) { log('顔の自動位置合わせには CBCT が必要です（皮膚の表面どうしで合わせます）', 'warn'); return; }
+  busy(true, '顔 ⇄ CBCT（皮膚表面）を自動で位置合わせ中…'); await tick();
+  if (!S.cbct.skin) {
+    const vol = S.cbct.vol, Mv = volumeMatrix(vol);
+    S.cbct.skin = volumeIsosurface(vol, S.cbct.thr?.skin ?? -400, 2, (i, j, k) => mApply(Mv, [i, j, k]));
+  }
+  const P = S.face.obj.positions;
+  let best = null;
+  // 顔スキャンの上下の向きは機器ごとに違うので、6 方向を試す
+  for (const upSrc of [[0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1], [1, 0, 0], [-1, 0, 0]]) {
+    busy(true, `顔 ⇄ CBCT を自動で位置合わせ中…（向き ${[[0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1], [1, 0, 0], [-1, 0, 0]].findIndex((u) => u === upSrc) + 1}/6）`); await tick();
+    const r = autoRegister(P, S.cbct.skin.positions, { upSrc, upDst: [0, 0, 1], tryFlip: false, shifts: [0] });
+    if (r && (!best || r.inlier > best.inlier)) best = r;
+  }
+  if (!best) { log('顔の自動位置合わせに失敗しました。対応点で合わせてください', 'warn'); return; }
+  S.face.M = mMul(S.cbct.M, best.matrix); // 顔 → CBCT → スキャン
+  S.face.alignedToCbct = true;
+  drawFace();
+  const msg = `顔⇄CBCT 自動位置合わせ: 一致率 ${(best.inlier * 100).toFixed(0)}%, 誤差 ${best.rms.toFixed(2)} mm`;
+  log(best.inlier < 0.2 ? `${msg}。一致率が低いため結果を確認してください` : msg, best.inlier < 0.2 ? 'warn' : 'ok');
+}
+$('autoRegScan').onclick = () => {
+  if (!S.cbct) return alert('先に CBCT を読み込んでください');
+  if (!S.scans.upper && !S.scans.lower) return alert('先に口腔内スキャンを読み込んでください');
+  withBusy('自動位置合わせ中…', async () => { if (!S.cbct.iso) buildIso(); await autoAlignScanCbct(); });
+};
+$('autoRegFace').onclick = () => {
+  if (!S.face) return alert('先に顔スキャンを読み込んでください');
+  withBusy('自動位置合わせ中…', autoAlignFace);
+};
 function scanCenter() {
   const pts = [];
   for (const j of JAWS) if (S.scans[j]) { const b = S.scans[j].bbox(); pts.push(scale(add(b.min, b.max), 0.5)); }
@@ -181,6 +296,7 @@ $('fileDicom').onchange = (e) => e.target.files.length && withBusy('DICOM 読込
 
 async function loadFace(text, texURL = null) {
   const obj = parseOBJ(text);
+  faceToMM(obj);
   const sc = scanCenter();
   let c = [0, 0, 0];
   const P = obj.positions;
@@ -191,12 +307,26 @@ async function loadFace(text, texURL = null) {
   $('statusFace').textContent = `${(obj.indices.length / 3).toLocaleString()} 面${obj.uvs ? '（UVあり）' : ''}${texURL ? '・テクスチャあり' : ''}`;
   log('フェイススキャンを読み込み');
 }
-$('fileFace').onchange = (e) => e.target.files[0] && withBusy('OBJ 読込中…', async () => loadFace(await readFile(e.target.files[0], 'text'), S.face?.texURL || null));
+$('fileFace').onchange = (e) => e.target.files[0] && withBusy('OBJ 読込中…', async () => {
+  S.face = null;
+  await loadFace(await readFile(e.target.files[0], 'text'), S.pendingTex || null);
+  if (S.cbct) await autoAlignFace();
+});
 $('fileFaceTex').onchange = (e) => e.target.files[0] && withBusy('画像読込中…', async () => {
   const url = await readFile(e.target.files[0], 'url');
   if (S.face) { S.face.texURL = url; drawFace(); } else S.pendingTex = url;
 });
 
+$('loadDemoCT').onclick = () => withBusy('デモ CBCT を生成中…', async () => {
+  if (!S.scans.upper || !S.scans.lower) return alert('先に「デモ症例を読み込む」を押してください');
+  const { vol } = makeDemoCBCT({ upper: makeDemoJaw('upper'), lower: makeDemoJaw('lower') });
+  // 実際の CT と同じく、スキャンとは無関係な座標にしておく（自動位置合わせの確認用）
+  const R = [Math.cos(0.6), -Math.sin(0.6), 0, Math.sin(0.6), Math.cos(0.6), 0, 0, 0, 1];
+  vol.axes = vol.axes.map((a) => [R[0] * a[0] + R[1] * a[1], R[3] * a[0] + R[4] * a[1], a[2]]);
+  vol.origin = [vol.origin[0] + 60, vol.origin[1] - 40, vol.origin[2] + 90];
+  await setVolume(vol);
+  log('デモ CBCT を読み込みました（スキャンとずれた座標から自動で位置合わせ）', 'ok');
+});
 $('loadDemo').onclick = () => withBusy('デモ症例を生成中…', async () => {
   for (const jaw of JAWS) {
     const { mesh, seeds } = makeDemoJaw(jaw);
@@ -355,6 +485,7 @@ $('makeIso').onclick = () => {
     const vol = S.cbct.vol, Mv = volumeMatrix(vol);
     S.cbct.iso = volumeIsosurface(vol, num('isoThr'), parseInt($('isoStep').value, 10), (i, j, k) => mApply(Mv, [i, j, k]));
     drawIso();
+    setVis('iso', true);
     log(`CBCT 等値面: ${S.cbct.iso.nf.toLocaleString()} 面`);
   });
 };
@@ -1163,7 +1294,7 @@ $('openProject').onchange = (e) => e.target.files[0] && withBusy('プロジェ�
 // CBCT 読込時に保存済みの位置合わせを復元
 const _loadDicom = loadDicomFiles;
 async function loadDicomWithRestore(files) {
-  await _loadDicom(files);
+  await _loadDicom(files, { autoAlign: !S.pendingCbctMatrix });
   if (S.pendingCbctMatrix && S.cbct) { S.cbct.M = S.pendingCbctMatrix; S.pendingCbctMatrix = null; drawSlices(); log('CBCT の位置合わせを復元しました'); }
 }
 $('fileDicomDir').onchange = (e) => e.target.files.length && withBusy('DICOM 読込中…', () => loadDicomWithRestore(e.target.files));

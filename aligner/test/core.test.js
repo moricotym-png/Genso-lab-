@@ -157,3 +157,32 @@ test('シェルは水密で、厚み相当の体積を持つ', () => {
   assert.ok(r.check.watertight, JSON.stringify(r.check));
   assert.ok(r.volume > 300, `volume ${r.volume}`);
 });
+
+test('自動位置合わせ：スキャンと無関係な座標の CBCT に歯冠を合わせられる', async () => {
+  const { makeDemoCBCT } = await import('../src/demo/demoCase.js');
+  const { volumeThresholds } = await import('../src/geom/volstats.js');
+  const { volumeIsosurface } = await import('../src/geom/isosurface.js');
+  const { autoRegister } = await import('../src/geom/register.js');
+  const { mMul } = await import('../src/core/vec.js');
+  const d = { lower: makeDemoJaw('lower'), upper: makeDemoJaw('upper') };
+  const { vol } = makeDemoCBCT(d, { spacing: 0.5 });
+  const th = volumeThresholds(vol);
+  assert.ok(th.skin < th.bone && th.bone < th.teeth);
+  const Mv = volumeMatrix(vol);
+  const iso = volumeIsosurface(vol, th.teeth, 1, (i, j, k) => mApply(Mv, [i, j, k]));
+  const Tk = mFromRT(r3Axis([0.2, 0.3, 0.93].map((x, _, a) => x / Math.hypot(...a)), 2.1), [40, -25, 13]); // 真の CT→スキャン
+  const pts = [];
+  for (const jaw of ['upper', 'lower']) {
+    const P = d[jaw].mesh.positions, s = jaw === 'lower' ? 1 : -1;
+    const hs = []; for (let i = 0; i < P.length; i += 3) hs.push(P[i + 2] * s);
+    const cut = [...hs].sort((a, b) => a - b)[Math.floor(hs.length * 0.55)];
+    for (let i = 0; i < P.length; i += 3) if (P[i + 2] * s > cut) pts.push(...mApply(Tk, [P[i], P[i + 1], P[i + 2]]));
+  }
+  const up = mApply(Tk, [0, 0, 1]).map((x, k) => x - mApply(Tk, [0, 0, 0])[k]);
+  const r = autoRegister(Float32Array.from(pts), iso.positions, { upSrc: up, upDst: [0, 0, 1], shifts: [-8, -4, 0, 4, 8] });
+  const E = mMul(r.matrix, Tk);
+  for (const p of [[0, 0, 0], [20, -30, 5], [-20, -30, 5]]) {
+    const q = mApply(E, p);
+    assert.ok(Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 0.3, `error at ${p}`);
+  }
+});
