@@ -1,0 +1,11 @@
+{
+  "name": "aligner-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ダイレクトプリント・アライナー設計ソフト（ブラウザ版プロトタイプ）",
+  "type": "module",
+  "scripts": {
+    "start": "node tools/serve.js",
+    "test": "node --test test/*.test.js"
+  }
+}

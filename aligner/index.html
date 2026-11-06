@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aligner Studio</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --ink: #1d2433; --muted: #667085; --line: #d9dde5;
+    --accent: #1f6feb; --accent-ink: #ffffff; --warn: #b54708; --warn-bg: #fff4e5; --ok: #067647; --danger: #c01048;
+    --view: #e9edf3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11141a; --panel: #1a1f29; --ink: #e6e9ef; --muted: #98a2b3; --line: #2c3442;
+      --accent: #4c8dff; --accent-ink: #0b1220; --warn: #fdb022; --warn-bg: #2a2110; --ok: #47cd89; --danger: #f97066;
+      --view: #0d1016;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.5 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  #app { display: grid; grid-template-columns: 340px 1fr 300px; grid-template-rows: 44px 1fr 64px; height: 100vh; }
+  header { grid-column: 1 / 4; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  header .sp { flex: 1; }
+  #left, #right { background: var(--panel); overflow: auto; border-right: 1px solid var(--line); }
+  #right { border-right: 0; border-left: 1px solid var(--line); padding: 10px 12px; }
+  #viewWrap { position: relative; background: var(--view); overflow: hidden; }
+  #view { width: 100%; height: 100%; display: block; }
+  #toolbar { position: absolute; top: 8px; left: 8px; right: 8px; display: flex; flex-wrap: wrap; gap: 4px; pointer-events: none; }
+  #toolbar > * { pointer-events: auto; }
+  #hint { position: absolute; bottom: 8px; left: 8px; background: color-mix(in srgb, var(--panel) 88%, transparent); padding: 4px 8px; border-radius: 6px; color: var(--muted); max-width: 70%; }
+  #timeline { grid-column: 1 / 4; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: var(--panel); border-top: 1px solid var(--line); }
+  #timeline input[type=range] { flex: 1; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 8px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  .tabs button { flex: 1 0 30%; }
+  .step { padding: 10px 12px; display: none; }
+  .step.on { display: block; }
+  h2 { font-size: 13px; margin: 12px 0 6px; font-weight: 650; }
+  h2:first-child { margin-top: 0; }
+  button, .btn { font: inherit; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.on { background: color-mix(in srgb, var(--accent) 18%, var(--panel)); border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
+  .row > label { flex: 1; color: var(--muted); }
+  .row input[type=number], .row select, .row input[type=text] { width: 92px; font: inherit; padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--ink); }
+  .row input[type=range] { flex: 1; }
+  .note { color: var(--muted); font-size: 12px; margin: 4px 0; }
+  .warn { color: var(--warn); background: var(--warn-bg); border-radius: 6px; padding: 6px 8px; margin: 6px 0; font-size: 12px; }
+  .ok { color: var(--ok); }
+  .danger { color: var(--danger); }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 3px 4px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  td input { width: 56px; font: inherit; padding: 1px 3px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--ink); }
+  .file { display: block; margin: 4px 0; }
+  .file input { display: none; }
+  .status { font-size: 12px; color: var(--muted); }
+  .fdi-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; margin: 6px 0; }
+  .fdi-grid button { padding: 3px 0; font-size: 11px; }
+  canvas.section { width: 100%; background: #000; border-radius: 6px; margin-top: 4px; }
+  #cephCanvas { width: 100%; background: #222; border-radius: 6px; cursor: crosshair; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; font-size: 12px; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  #busy { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 10; }
+  #busy .box { background: var(--panel); padding: 16px 20px; border-radius: 10px; min-width: 260px; }
+  #busy progress { width: 100%; }
+  .pose-row { display: grid; grid-template-columns: 1fr 68px 26px 26px; gap: 4px; align-items: center; margin: 3px 0; }
+  .pose-row span { color: var(--muted); font-size: 12px; }
+  .pose-row input { width: 68px; font: inherit; padding: 2px 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--ink); }
+  .pose-row button { padding: 1px 0; }
+  .legend { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  @media (max-width: 900px) {
+    #app { grid-template-columns: 1fr; grid-template-rows: 44px 50vh auto auto 64px; height: auto; }
+    header, #timeline { grid-column: 1; }
+    #viewWrap { grid-row: 2; }
+    #left { grid-row: 3; }
+    #right { grid-row: 4; }
+    #timeline { grid-row: 5; }
+  }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.js", "three/addons/": "./vendor/" } }
+</script>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Aligner Studio <span class="status">ダイレクトプリント・アライナー設計（研究・試作用）</span></h1>
+    <div class="sp"></div>
+    <label class="btn file">プロジェクトを開く<input type="file" id="openProject" accept=".zip,.alnproj"></label>
+    <button id="saveProject">プロジェクトを保存</button>
+  </header>
+
+  <aside id="left">
+    <nav class="tabs" id="tabs">
+      <button data-step="import" class="on">1 取込</button>
+      <button data-step="register">2 位置合わせ</button>
+      <button data-step="segment">3 歯の分割</button>
+      <button data-step="roots">4 歯軸・歯根</button>
+      <button data-step="ceph">5 セファロ</button>
+      <button data-step="setup">6 セットアップ</button>
+      <button data-step="staging">7 ステージング</button>
+      <button data-step="export">8 アライナー出力</button>
+    </nav>
+
+    <section class="step on" id="step-import">
+      <h2>口腔内スキャン（STL）</h2>
+      <label class="btn file">上顎 STL を選ぶ<input type="file" id="fileUpper" accept=".stl"></label>
+      <label class="btn file">下顎 STL を選ぶ<input type="file" id="fileLower" accept=".stl"></label>
+      <div class="status" id="statusScan">未読込</div>
+      <p class="note">上下顎は口腔内スキャナーから咬合位のまま書き出したもの（同じ座標系）を使ってください。単位は mm。</p>
+      <h2>CT / CBCT（DICOM）</h2>
+      <label class="btn file">DICOM フォルダを選ぶ<input type="file" id="fileDicomDir" webkitdirectory multiple></label>
+      <label class="btn file">DICOM ファイルを選ぶ（複数可）<input type="file" id="fileDicom" multiple></label>
+      <div class="status" id="statusCT">未読込</div>
+      <p class="note">非圧縮の DICOM に対応。大きいボリュームは自動で間引きます。</p>
+      <h2>フェイススキャン（OBJ）</h2>
+      <label class="btn file">OBJ を選ぶ<input type="file" id="fileFace" accept=".obj"></label>
+      <label class="btn file">テクスチャ画像（任意）<input type="file" id="fileFaceTex" accept="image/*"></label>
+      <div class="status" id="statusFace">未読込</div>
+      <h2>デモ</h2>
+      <button id="loadDemo">デモ症例を読み込む（合成データ）</button>
+      <p class="note">実データがなくても、分割 → セットアップ → ステージング → 出力までを試せます。</p>
+    </section>
+
+    <section class="step" id="step-register">
+      <h2>CBCT の等値面</h2>
+      <div class="row"><label>しきい値 (HU)</label><input type="number" id="isoThr" value="1200" step="50"></div>
+      <div class="row"><label>間引き</label><select id="isoStep"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
+      <button id="makeIso">等値面を作成</button>
+      <div class="row"><label>断面表示</label><button id="toggleSlices">CBCT 断面</button></div>
+      <div class="row"><label>軸位</label><input type="range" id="sliceZ" min="0" max="1" step="0.001" value="0.5"></div>
+      <div class="row"><label>冠状</label><input type="range" id="sliceY" min="0" max="1" step="0.001" value="0.5"></div>
+      <div class="row"><label>矢状</label><input type="range" id="sliceX" min="0" max="1" step="0.001" value="0.5"></div>
+      <div class="row"><label>WL / WW</label><input type="number" id="winL" value="800" step="50"><input type="number" id="winW" value="3000" step="100"></div>
+      <h2>対応点による位置合わせ（基準＝口腔内スキャン）</h2>
+      <div class="row"><label>動かすデータ</label><select id="regTarget"><option value="cbct">CBCT</option><option value="face">フェイススキャン</option></select></div>
+      <div class="row">
+        <button id="pickMoving">① 動かす側の点を打つ</button>
+        <button id="pickFixed">② スキャン側の点を打つ</button>
+      </div>
+      <div class="status" id="regStatus">点: 0 / 0（3点以上、同じ順番で）</div>
+      <div class="row"><button id="regClear">点をクリア</button><button id="regSolve" class="primary">位置合わせ</button></div>
+      <div class="row"><button id="regICP">ICP で微調整（CBCT 等値面 ⇄ スキャン）</button></div>
+      <div class="status" id="regResult"></div>
+      <p class="note">例：左右の犬歯尖頭・中切歯切縁・大臼歯の頬側咬頭など、両方のデータで見える点を同じ順で選びます。</p>
+      <h2>表示</h2>
+      <div class="row"><label>顔の透明度</label><input type="range" id="faceOpacity" min="0" max="1" step="0.05" value="0.6"></div>
+    </section>
+
+    <section class="step" id="step-segment">
+      <h2>対象</h2>
+      <div class="row"><button id="segUpper" class="on">上顎</button><button id="segLower">下顎</button></div>
+      <h2>シード（歯冠を1回ずつクリック）</h2>
+      <div class="fdi-grid" id="fdiGrid"></div>
+      <div class="row"><button id="seedMode">シード配置モード</button><button id="gumSeedMode">歯肉シード</button><button id="seedClear">シードをクリア</button></div>
+      <p class="note">番号を選んでから歯冠をクリック。クリックごとに次の歯へ自動で進みます（右最後方 → 左最後方）。</p>
+      <h2>自動分割</h2>
+      <div class="row"><label>境界の強さ</label><input type="number" id="segWeight" value="4" step="0.5"></div>
+      <button id="segRun" class="primary">分割を実行</button>
+      <h2>手修正（ブラシ）</h2>
+      <div class="row"><button id="brushMode">ブラシ</button><label>半径 mm</label><input type="number" id="brushR" value="1.0" step="0.25"></div>
+      <div class="row"><label>塗るラベル</label><select id="brushLabel"></select></div>
+      <h2>歯モデルの作成</h2>
+      <button id="buildTeeth" class="primary">歯（歯冠＋歯根）を作成</button>
+      <div class="status" id="segStatus"></div>
+    </section>
+
+    <section class="step" id="step-roots">
+      <h2>選択中の歯</h2>
+      <div class="status" id="rootSel">右パネルまたはビューで歯を選択</div>
+      <div class="row"><label>歯根長 (mm)</label><input type="number" id="rootLen" step="0.5"></div>
+      <div class="row"><label>歯根の太さ（倍）</label><input type="number" id="rootScale" step="0.05"></div>
+      <div class="row"><label>抵抗中心（歯根長の割合）</label><input type="number" id="crRatio" step="0.05"></div>
+      <div class="row"><label>歯軸補正 近遠心 (°)</label><input type="number" id="axTip" step="1"></div>
+      <div class="row"><label>歯軸補正 頬舌 (°)</label><input type="number" id="axTorque" step="1"></div>
+      <button id="rootApply" class="primary">反映</button>
+      <h2>CBCT 断面（歯軸を通る）</h2>
+      <p class="note">頬舌断（左）と近遠心断（右）。黄色線が歯のモデル。CBCT の歯根に合うよう歯軸補正・歯根長を調整します。</p>
+      <div class="row"><canvas class="section" id="secBL" width="200" height="340"></canvas><canvas class="section" id="secMD" width="200" height="340"></canvas></div>
+    </section>
+
+    <section class="step" id="step-ceph">
+      <h2>側面セファロ画像</h2>
+      <label class="btn file">画像を選ぶ（PNG/JPG）<input type="file" id="fileCeph" accept="image/*"></label>
+      <button id="cephDemo">デモ計測点を使う</button>
+      <canvas id="cephCanvas" width="600" height="600"></canvas>
+      <div class="row"><label>打つ点</label><select id="cephLm"></select></div>
+      <div class="row"><button id="cephCalib">倍率合わせ（2点）</button><label>実長 mm</label><input type="number" id="cephCalibMm" value="10" step="1"></div>
+      <div class="status" id="cephScale">倍率: 未設定（直線計測は px のまま）</div>
+      <h2>計測値と目標値</h2>
+      <table id="cephTable"></table>
+      <h2>咬合の目標</h2>
+      <div class="row"><label>オーバージェット (mm)</label><input type="number" id="tgtOJ" value="2.5" step="0.5"></div>
+      <div class="row"><label>オーバーバイト (mm)</label><input type="number" id="tgtOB" value="2.0" step="0.5"></div>
+      <button id="cephApply" class="primary">目標をセットアップに反映</button>
+      <div class="status" id="cephApplied"></div>
+    </section>
+
+    <section class="step" id="step-setup">
+      <h2>対象</h2>
+      <div class="row"><button id="setUpper" class="on">上顎</button><button id="setLower">下顎</button></div>
+      <h2>排列の条件</h2>
+      <div class="row"><label>歯列弓形態</label><select id="optArch"><option value="current">現状の形を維持</option><option value="ovoid">オボイド</option><option value="tapered">テーパー</option><option value="square">スクエア</option></select></div>
+      <div class="row"><label>片側拡大量 (mm)</label><input type="number" id="optExp" value="0" step="0.5"></div>
+      <div class="row"><label>前歯の前方移動 (mm)</label><input type="number" id="optAdv" value="0" step="0.5"></div>
+      <div class="row"><label>切歯トルク変化 (°)</label><input type="number" id="optTorque" value="0" step="1"></div>
+      <div class="row"><label>IPR 上限/接触 (mm)</label><input type="number" id="optIpr" value="0.3" step="0.05"></div>
+      <div class="row"><label>自動前方拡大の上限 (mm)</label><input type="number" id="optMaxAdv" value="1.5" step="0.5"></div>
+      <div class="row"><label><input type="checkbox" id="optMolar" checked> 大臼歯を固定</label></div>
+      <div class="row"><label><input type="checkbox" id="optLevel" checked> レベリング</label></div>
+      <div class="row"><label><input type="checkbox" id="optRot" checked> 捻転を除く</label></div>
+      <div class="row"><label><input type="checkbox" id="optMid" checked> 正中を合わせる</label></div>
+      <div class="row"><label><input type="checkbox" id="optClose" checked> 空隙を閉じる</label></div>
+      <div class="row"><button id="runSetup" class="primary">自動排列</button><button id="runSetupBoth">上下とも</button><button id="fitOJOB">OJ/OB を目標へ</button></div>
+      <div id="setupReport"></div>
+      <h2>目標位置の手修正</h2>
+      <p class="note">ステージを最終にして、右パネルの数値・矢印、またはビューのギズモ（G / R キー）で歯を動かします。</p>
+    </section>
+
+    <section class="step" id="step-staging">
+      <h2>1ステージの移動上限</h2>
+      <div class="row"><label>並進 (mm)</label><input type="number" id="limT" value="0.25" step="0.05"></div>
+      <div class="row"><label>挺出 (mm)</label><input type="number" id="limE" value="0.15" step="0.05"></div>
+      <div class="row"><label>圧下 (mm)</label><input type="number" id="limI" value="0.20" step="0.05"></div>
+      <div class="row"><label>傾斜・トルク (°)</label><input type="number" id="limA" value="2" step="0.5"></div>
+      <div class="row"><label>捻転 (°)</label><input type="number" id="limR" value="2" step="0.5"></div>
+      <div class="row"><label>捻転 犬歯・小臼歯 (°)</label><input type="number" id="limR2" value="1.5" step="0.5"></div>
+      <div class="row"><label>進め方</label><select id="stStrategy"></select></div>
+      <div class="row"><button id="runStaging" class="primary">自動ステージング</button><button id="checkIPR">IPR 時期を計算</button></div>
+      <div id="stagingReport"></div>
+      <h2>歯ごとの開始・終了ステージ</h2>
+      <table id="stageTable"></table>
+      <h2>アタッチメント（選択中の歯）</h2>
+      <div class="row"><label>幅×高さ×厚み (mm)</label><input type="number" id="attW" value="3" step="0.5"><input type="number" id="attH" value="2" step="0.5"><input type="number" id="attD" value="1" step="0.25"></div>
+      <div class="row"><button id="attAdd">頬側に追加</button><button id="attClear">削除</button></div>
+      <h2>書き出し</h2>
+      <button id="exportCSV">移動量の表（CSV）</button>
+    </section>
+
+    <section class="step" id="step-export">
+      <h2>シェルの条件</h2>
+      <div class="row"><label>ボクセル (mm)</label><input type="number" id="shVoxel" value="0.2" step="0.05"></div>
+      <div class="row"><label>隙間（内面オフセット, mm）</label><input type="number" id="shGap" value="0.05" step="0.01"></div>
+      <div class="row"><label>厚みの指定</label><select id="shMode"><option value="uniform">均一</option><option value="zone">部位別</option></select></div>
+      <div class="row"><label>厚み 均一/前歯 (mm)</label><input type="number" id="shT" value="0.6" step="0.05"></div>
+      <div class="row"><label>厚み 小臼歯 (mm)</label><input type="number" id="shTP" value="0.65" step="0.05"></div>
+      <div class="row"><label>厚み 大臼歯 (mm)</label><input type="number" id="shTM" value="0.8" step="0.05"></div>
+      <div class="row"><label>トリム：歯頸線から歯肉側へ (mm)</label><input type="number" id="shTrim" value="1.0" step="0.25"></div>
+      <div class="row"><label>平滑化（回）</label><input type="number" id="shSmooth" value="4" step="1"></div>
+      <div class="row"><label>間引きの許容誤差 (mm, 0=しない)</label><input type="number" id="shDec" value="0.01" step="0.005"></div>
+      <div class="row"><label><input type="checkbox" id="shBlock"> アンダーカットをブロックアウト</label></div>
+      <p class="note">数値は初期値です。材料・プリンターの推奨値と試作で確認してください（LuxCreo の資料では部位別厚みの例として前歯 0.5 mm・臼歯 0.8 mm が挙げられています）。</p>
+      <h2>プレビュー</h2>
+      <div class="row"><label>顎</label><select id="shJaw"><option value="upper">上顎</option><option value="lower">下顎</option></select><button id="shPreview" class="primary">現在のステージで生成</button></div>
+      <div class="status" id="shStatus"></div>
+      <h2>一括書き出し（STL / ZIP）</h2>
+      <div class="row"><label>症例 ID</label><input type="text" id="caseId" value="CASE001"></div>
+      <div class="row"><label>ステージ範囲</label><input type="number" id="shFrom" value="1" min="0"><input type="number" id="shTo" value="1" min="0"></div>
+      <div class="row"><label><input type="checkbox" id="shUp" checked> 上顎</label><label><input type="checkbox" id="shLo" checked> 下顎</label></div>
+      <div class="row"><label><input type="checkbox" id="shModels"> 模型（各ステージの歯列）も含める</label></div>
+      <button id="shExport" class="primary">ZIP で書き出し</button>
+      <div class="status" id="shExportStatus"></div>
+      <p class="note">出力は mm 単位・閉じた（水密な）バイナリ STL。ファイル名例：CASE001_U_S01.stl。LuxCreo 側のソフトで配置・サポート付けを行ってプリントします。</p>
+    </section>
+  </aside>
+
+  <main id="viewWrap">
+    <canvas id="view"></canvas>
+    <div id="toolbar"></div>
+    <div id="hint">左ドラッグ: 回転 / 右ドラッグ: 平行移動 / ホイール: 拡大</div>
+  </main>
+
+  <aside id="right">
+    <h2>選択中の歯</h2>
+    <div id="toothTitle" class="status">なし</div>
+    <div id="poseEditor"></div>
+    <div class="row"><button id="gizmoT">移動ギズモ (G)</button><button id="gizmoR">回転ギズモ (R)</button><button id="gizmoOff">解除</button></div>
+    <div class="row"><button id="poseReset">この歯をリセット</button></div>
+    <h2>移動量（初期 → 最終）</h2>
+    <div id="toothTotals" class="kv"></div>
+    <h2>このステージの接触</h2>
+    <div id="contactInfo" class="note">「接触を計算」で表示</div>
+    <button id="calcContacts">接触を計算</button>
+    <h2>ログ</h2>
+    <div id="log" class="note"></div>
+  </aside>
+
+  <footer id="timeline">
+    <button id="play">▶</button>
+    <span>ステージ</span>
+    <input type="range" id="stage" min="0" max="0" value="0">
+    <span id="stageLabel">0 / 0</span>
+  </footer>
+</div>
+<div id="busy"><div class="box"><div id="busyMsg">処理中…</div><progress id="busyBar" max="1" value="0"></progress></div></div>
+<script type="module" src="./src/app/main.js"></script>
+</body>
+</html>
