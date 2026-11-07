@@ -60,8 +60,23 @@ export function buildArch(jaw, scan, labels, prev = null) {
   gc = scale(gc, 1 / Math.max(1, ging.nv));
   const frame = computeArchFrame(crowns, gc);
   // 歯列弓曲線（歯冠重心でフィット）
-  const pts = [...crowns.values()].map((c) => toArchLocal(frame, c.centroid));
+  let pts = [...crowns.values()].map((c) => toArchLocal(frame, c.centroid));
   frame.curve = fitArch(pts.map((p) => [p[0], p[1]]));
+  // 歯列弓は前方に凸（y = c0 + c2 x^2 で c2 < 0）。逆なら前後を取り違えているので反転
+  if (frame.curve.c2 > 0) {
+    frame.ey = scale(frame.ey, -1); frame.ex = scale(frame.ex, -1);
+    pts = [...crowns.values()].map((c) => toArchLocal(frame, c.centroid));
+    frame.curve = fitArch(pts.map((p) => [p[0], p[1]]));
+  }
+  // 歯番号の左右の確認：同じ側（右=1・4象限、左=2・3象限）の歯は x の符号がそろうはず
+  const warnings = [];
+  const sx = { '-1': 0, '1': 0 };
+  for (const [fdi, c] of crowns) sx[(Math.floor(fdi / 10) === 1 || Math.floor(fdi / 10) === 4) ? '-1' : '1'] += toArchLocal(frame, c.centroid)[0];
+  for (const [fdi, c] of crowns) {
+    const side = (Math.floor(fdi / 10) === 1 || Math.floor(fdi / 10) === 4) ? '-1' : '1';
+    const x = toArchLocal(frame, c.centroid)[0];
+    if (Math.abs(x) > 4 && Math.sign(x) !== Math.sign(sx[side])) warnings.push(`${fdi} の位置が反対側にあります（歯番号の左右の付け間違いの可能性）`);
+  }
   const teeth = new Map();
   for (const [fdi, crown] of crowns) {
     const old = prev?.teeth?.get(fdi);
@@ -73,7 +88,7 @@ export function buildArch(jaw, scan, labels, prev = null) {
   const occl = [...teeth.values()].map((t) => toArchLocal(frame, t.occlusalPoint)[2]);
   const zOff = occl.reduce((a, b) => a + b, 0) / Math.max(1, occl.length);
   frame.origin = add(frame.origin, scale(frame.ez, zOff));
-  const arch = { jaw, scan, labels, faceLabels: fl, teeth, frame, gingiva: null };
+  const arch = { jaw, scan, labels, faceLabels: fl, teeth, frame, gingiva: null, warnings };
   arch.gingiva = buildGingiva(arch, ging);
   return arch;
 }

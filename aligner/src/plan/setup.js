@@ -134,6 +134,7 @@ export function autoSetup(arch, options = {}) {
         targets.set(t.fdi, opt.leveling || opt.correctRotation ? placeTooth(arch, t, curve, null, { ...opt, correctRotation: false, keepXY: true }) : zeroPose());
       }
     }
+    const sPos0 = new Map(sPos);
     // 接触の詰め：隣接歯との重なり・すき間を測って弧長位置を補正（正中から遠心へ）
     let err = new Map();
     for (let it = 0; it <= (opt.contactIterations ?? 4); it++) {
@@ -148,7 +149,12 @@ export function autoSetup(arch, options = {}) {
         movable.forEach((t, i) => {
           if (i > 0) shift += errOf(err, movable[i - 1], t) - iprAt(movable[i - 1], t);
           if (Math.abs(shift) > 0.02) {
-            sPos.set(t.fdi, sPos.get(t.fdi) + xSign[s] * shift * 0.8);
+            // 1回の補正量を制限（形状が特殊な歯で補正が暴走しないように）
+            const st = Math.max(-3, Math.min(3, shift * 0.8));
+            const base = sPos0.get(t.fdi);
+            let nv = sPos.get(t.fdi) + xSign[s] * st;
+            if (Math.abs(nv - base) > 8) nv = base + Math.sign(nv - base) * 8; // 最初の位置から 8mm まで
+            sPos.set(t.fdi, nv);
             targets.set(t.fdi, placeTooth(arch, t, curve, curve.xAtArc(sPos.get(t.fdi)), opt));
             changed = true;
           }
@@ -215,6 +221,16 @@ export function autoSetup(arch, options = {}) {
   const curve = res.curve;
   report.curve = curve.toJSON();
   report.contacts = contactReport(arch, targets, order);
+  // 結果の妥当性チェック：ありえないほど大きな移動を知らせる
+  for (const [fdi, p] of targets) {
+    const tr = Math.hypot(p.md, p.bl, p.ext);
+    const big = [];
+    if (tr > 6) big.push(`移動 ${tr.toFixed(1)} mm`);
+    if (Math.abs(p.rot) > 35) big.push(`捻転 ${p.rot.toFixed(0)}°`);
+    if (Math.abs(p.tip) > 20 || Math.abs(p.torque) > 20) big.push(`傾斜 ${p.tip.toFixed(0)}°/${p.torque.toFixed(0)}°`);
+    if (big.length) report.warnings.push(`${fdi}: 移動量が非常に大きい（${big.join('、')}）。歯の分割・歯番号・歯冠幅を確認してください`);
+  }
+  if (arch.warnings?.length) report.warnings.unshift(...arch.warnings);
   report.ipr = [...iprPlan.entries()].map(([k, v]) => ({ contact: k, mm: v }));
   return { targets, report, curve };
 }

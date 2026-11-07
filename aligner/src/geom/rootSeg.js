@@ -205,6 +205,10 @@ export function extractRoot(vol, M, t, neighbors = [], opts = {}) {
   if (dl[2] < 0) dl = scale(dl, -1);
   const axis = norm(add(add(scale(m, dl[0]), scale(b, dl[1])), scale(z, dl[2])));
   const rootLength = -(hStart - last * h);
+  // 信頼性の確認：平均的な歯根長から大きく外れる場合は骨への漏れ・途切れとみなす
+  const expect = t.info?.rootLength ?? 14;
+  if (rootLength > expect * 1.45) return { error: `歯根が骨と区別できませんでした（${rootLength.toFixed(1)} mm まで伸びたため不採用）。しきい値の位置を上げて再試行してください`, iTooth, iLow, threshold: T };
+  if (rootLength < expect * 0.45) return { error: `歯根を途中までしか追跡できませんでした（${rootLength.toFixed(1)} mm）。しきい値の位置を下げて再試行してください`, iTooth, iLow, threshold: T };
   return {
     mesh, rootLength, axis, roots: maxRoots, threshold: T, iTooth, iLow,
     tipDeg: (Math.atan2(dot(axis, m), dot(axis, z)) * 180) / Math.PI,
