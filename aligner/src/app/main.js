@@ -16,15 +16,16 @@ import { poseMatrix, matrixToPose, attachmentMesh, buccalAnchor } from '../geom/
 import { buildArch, morphGingiva, refreshTooth, shellInput } from '../plan/arch.js';
 import { archOrder, toothInfo, POSE_KEYS, POSE_LABELS, zeroPose, DEFAULT_LIMITS, positionOf } from '../plan/teeth.js';
 import { CEPH_LANDMARKS, CEPH_MEASURES, DEFAULT_TARGETS, measureCeph, cephToToothGoals } from '../plan/ceph.js';
-import { autoSetup, DEFAULT_SETUP, overjetOverbite, previewArchCurve } from '../plan/setup.js';
-import { autoStage, poseAt, posesAt, setKey, checkVelocities, stagingTable, contactReport, STRATEGIES, stagesNeeded } from '../plan/staging.js';
+import { autoSetup, DEFAULT_SETUP, overjetOverbite, previewArchCurve, curveThrough } from '../plan/setup.js';
+import { ponticMesh } from '../geom/pontic.js';
+import { autoStage, poseAt, posesAt, setKey, checkVelocities, stagingTable, contactReport, STRATEGIES, stagesNeeded, limitFor } from '../plan/staging.js';
 import { makeDemoJaw, makeDemoCBCT, DEMO_CEPH_POINTS } from '../demo/demoCase.js';
 
 const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.14（初期の歯列と比較）';
+export const APP_VERSION = 'v0.15（ツール・レイヤーの追加）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -54,7 +55,7 @@ const S = {
   setJaw: 'upper',
   mode: null,
   seedFdi: 17,
-  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: false, bone: false, skin: false, vr: true, cbct3d: true, slices: false, face: true, shell: true, guides: true, ghost: false, heat: false },
+  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: false, bone: false, skin: false, vr: true, cbct3d: true, slices: false, face: true, shell: true, guides: true, ghost: false, heat: false, ipr: false, collide: false, grid: false },
 };
 
 const viewer = new Viewer($('view'));
@@ -109,17 +110,17 @@ $('tabs').addEventListener('click', (e) => {
 // ------------------------------------------------------------------ ツールバー
 const TOOLBAR = [
   ['upper', '上顎'], ['lower', '下顎'], ['scan', 'スキャン'], ['gingiva', '歯肉'], ['roots', '歯根'],
-  ['cbct3d', 'CBCT 立体'], ['slices', 'CBCT 断面'], ['face', '顔'], ['shell', 'アライナー'], ['guides', '基準線'], ['ghost', '初期と重ねる'], ['heat', '移動量の色'],
+  ['cbct3d', 'CBCT 立体'], ['slices', 'CBCT 断面'], ['face', '顔'], ['shell', 'アライナー'], ['guides', '基準線'], ['ghost', '初期と重ねる'], ['heat', '移動量の色'], ['ipr', 'IPR'], ['collide', '衝突'], ['grid', 'グリッド'],
 ];
 for (const [k, label] of TOOLBAR) {
   const b = document.createElement('button');
   b.textContent = label;
   b.classList.toggle('on', S.vis[k]);
-  b.onclick = () => { S.vis[k] = !S.vis[k]; b.classList.toggle('on', S.vis[k]); applyVisibility(); if (k === 'heat' || k === 'ghost' || k === 'guides') { updatePoses(); updateHeatLegend(); } };
+  b.onclick = () => { S.vis[k] = !S.vis[k]; b.classList.toggle('on', S.vis[k]); applyVisibility(); if (['heat', 'ghost', 'guides', 'ipr', 'collide', 'grid'].includes(k)) { updatePoses(); updateHeatLegend(); } };
   b.dataset.vis = k;
   $('toolbar').append(b);
 }
-for (const [v, label] of [['front', '正面'], ['top', '上'], ['bottom', '下'], ['right', '右'], ['left', '左']]) {
+for (const [v, label] of [['home', 'ホーム'], ['front', '正面'], ['back', '後'], ['top', '上'], ['bottom', '下'], ['right', '右'], ['left', '左']]) {
   const b = document.createElement('button');
   b.textContent = label;
   b.onclick = () => viewer.view(v);
@@ -135,6 +136,9 @@ function applyVisibility() {
     viewer.setVisible(`ging_${j}`, show && S.vis.gingiva);
     viewer.setVisible(`shell_${j}`, show && S.vis.shell);
     viewer.setVisible(`ghost_${j}`, show && !!S.vis.ghost && S.stage !== 0);
+    viewer.setVisible(`pontic_${j}`, show);
+    const ex = S.setupOpt?.[j]?.extracted || [];
+    for (const g of [`teeth_${j}`, `ghost_${j}`]) for (const c of viewer.group(g).children) if (ex.includes(c.userData.fdi)) c.visible = false;
     for (const c of viewer.group(`teeth_${j}`).children) if (c.userData.root) c.visible = S.vis.roots;
   }
   viewer.setVisible('iso', S.vis.cbct3d && S.vis.iso);
@@ -531,7 +535,9 @@ function updatePoses() {
       if (!c.userData.root && !c.userData.att) {
         c.material.color.setHex(c.userData.fdi === S.sel ? COL.crownSel : c.userData.vc ? 0xffffff : COL.crown);
         const col = c.geometry.attributes.color;
-        if (col && M && S.vis.heat) {
+        const flags = S.vis.collide ? S.collideFlags?.[jaw]?.get(c.userData.fdi) : null;
+        if (col && M && (S.vis.heat || flags)) {
+          if (!S.vis.heat && c.userData.baseColors) col.array.set(c.userData.baseColors);
           // 移動量の色：初期位置からの距離（0 mm 白 → 1.5 mm 黄 → 3 mm 以上 赤）
           const P = c.geometry.attributes.position.array, A = col.array;
           for (let i = 0; i < P.length; i += 3) {
@@ -539,7 +545,9 @@ function updatePoses() {
             const dx = M[0] * x + M[4] * y + M[8] * z + M[12] - x, dy = M[1] * x + M[5] * y + M[9] * z + M[13] - y, dz = M[2] * x + M[6] * y + M[10] * z + M[14] - z;
             const d = Math.min(1, Math.hypot(dx, dy, dz) / 3);
             const r = 1, g = d < 0.5 ? 1 - 0.15 * (d / 0.5) : 0.85 * (1 - (d - 0.5) / 0.5), b = d < 0.5 ? 1 - d / 0.5 : 0;
-            A[i] = r; A[i + 1] = g; A[i + 2] = b;
+            if (S.vis.heat) { A[i] = r; A[i + 1] = g; A[i + 2] = b; }
+            // 衝突：赤＝食い込み、橙＝接触
+            if (flags) { const f = flags[i / 3]; if (f === 2) { A[i] = 1; A[i + 1] = 0.12; A[i + 2] = 0.12; } else if (f === 1) { A[i] = 1; A[i + 1] = 0.6; A[i + 2] = 0.1; } }
           }
           col.needsUpdate = true; c.userData.heatOn = true;
         } else if (col && c.userData.heatOn && c.userData.baseColors) {
@@ -562,8 +570,12 @@ function updatePoses() {
   updatePosePanel();
   syncGizmo();
   drawGuides();
+  drawPontics();
   applyVisibility();
   $('abToggle').classList.toggle('on', S.abSaved != null);
+  scheduleIpr();
+  scheduleCollisions();
+  $('toothExtract').textContent = S.sel && (S.setupOpt[archOfFdi(S.sel)].extracted || []).includes(S.sel) ? '抜歯を取り消す' : '抜歯（排列から外す）';
 }
 function updateHeatLegend() { $('heatLegend').style.display = S.vis.heat ? 'inline-flex' : 'none'; }
 // 初期 ⇄ 現在 の切り替え（見比べ用）
@@ -577,6 +589,8 @@ const maxStage = () => Math.max(0, ...JAWS.map((j) => S.plan[j]?.N || 0));
 // ---- 基準線（正中線・目標の歯列弓・歯軸） ----
 function drawGuides() {
   viewer.clearGroup('guides');
+  drawGrid();
+  drawCurveHandles();
   if (!S.vis.guides) return;
   const rf = typeof refFrame === 'function' ? refFrame() : null;
   for (const jaw of JAWS) {
@@ -595,7 +609,7 @@ function drawGuides() {
     }
     // 目標の歯列弓（黄）：セットアップ済みならその弓、未実行なら今の設定でのプレビュー
     const rep = S.setupReport[jaw];
-    const c = rep?.curve ? new ArchCurveMain(rep.curve.c0, rep.curve.c2, rep.curve.c4) : previewArchCurve(arch, S.setupOpt[jaw]);
+    const c = S.curveEdit?.jaw === jaw ? curveFromEdit(S.curveEdit) : rep?.curve ? new ArchCurveMain(rep.curve.c0, rep.curve.c2, rep.curve.c4) : previewArchCurve(arch, S.setupOpt[jaw]);
     const pts = [];
     for (let i = -60; i <= 60; i++) { const x = (i / 60) * 34; const y = c.y(x); if (y > -50) pts.push(L(x, y)); }
     viewer.addLine('guides', pts, 0xfacc15, { width: 2 });
@@ -1173,16 +1187,19 @@ function setMode(m) {
   $('fillMode').classList.toggle('on', m === 'fill');
   $('eraseMode').classList.toggle('on', m === 'erase');
   // 塗るときは左ドラッグを塗りに使い、回転は右ドラッグ・移動は中ボタンへ
-  const painting = m === 'brush' || m === 'erase';
+  const painting = m === 'brush' || m === 'erase' || m === 'curve';
+  $('curveEdit').classList.toggle('on', m === 'curve');
+  if (m !== 'curve') viewer.clearGroup('curveHandles');
   viewer.controls.enableRotate = true;
   viewer.controls.mouseButtons = painting ? { LEFT: -1, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE } : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-  if (!painting) brushCursor.visible = false;
+  if (!painting || m === 'curve') brushCursor.visible = false;
   if ((painting || m === 'fill') && S.scans[S.segJaw]) { ensureLabels(S.segJaw); setVis('scan', true); }
   const hints = {
     seed: `歯 ${S.seedFdi} の歯冠をクリック`, gumseed: '歯肉をクリック（境界がうまく出ない所に）',
     brush: `歯 ${S.paintLabel ?? '—'} を左ドラッグで塗る（右ドラッグ: 回転 / ホイール: 拡大 / Esc: 終了）`,
     erase: '左ドラッグで歯肉に戻す（右ドラッグ: 回転 / Esc: 終了）',
     fill: `歯 ${S.paintLabel ?? '—'} の歯冠をクリックすると、くぼみで囲まれた範囲を塗りつぶし`,
+    curve: '歯列弓のハンドル（紫）を左ドラッグで動かす（右ドラッグ: 回転 / Esc: 終了）',
     lm: S.lmTarget ? `「${lmName(S.lmTarget)}」を ${S.lmTarget.side === 'cbct' ? 'CBCT（立体または断面）' : S.lmTarget.side === 'scan' ? '口腔内スキャン' : '顔スキャン'} 上でクリック（Esc で中止）` : '',
   };
   $('hint').textContent = hints[m] || '左ドラッグ: 回転 / 右ドラッグ: 平行移動 / ホイール: 拡大 / 歯をクリックで選択';
@@ -1879,6 +1896,7 @@ function afterPlanChange(goFinal) {
   updatePoses();
   renderSetupReport();
   renderStageTable();
+  renderMoveTable();
 }
 function renderStageTable() {
   const rows = [];
@@ -1913,6 +1931,7 @@ function renderStageTable() {
   } else if (N) html += '<p class="note ok">全ステージで移動量は上限内です。</p>';
   if (S.iprSched) html += `<p class="note">IPR の時期: ${S.iprSched.length ? S.iprSched.map((c) => `${c.contact}: 最大 ${c.max.toFixed(2)}mm（ステージ ${c.firstStage} より前に）`).join('、') : '重なりなし'}</p>`;
   $('stagingReport').innerHTML = html;
+  drawStageChart();
 }
 $('checkIPR').onclick = () => withBusy('全ステージの接触を計算中…', async () => {
   // ステージごとに接触を計算（進捗表示のため1ステージずつ）
@@ -1985,7 +2004,7 @@ $('play').onclick = () => {
 
 // ------------------------------------------------------------------ アライナー出力
 function shellParams() {
-  return { voxel: num('shVoxel'), clearance: num('shGap'), thickness: num('shT'), trimOffset: num('shTrim'), blockout: $('shBlock').checked, smooth: parseInt($('shSmooth').value, 10) || 0, decimateError: num('shDec') || 0 };
+  return { voxel: num('shVoxel'), clearance: num('shGap'), thickness: num('shT'), trimOffset: num('shTrim'), blockout: $('shBlock').checked, smooth: parseInt($('shSmooth').value, 10) || 0, decimateError: num('shDec') || 0, trimStyle: $('shTrimStyle').value };
 }
 function toothThickness(fdi) {
   if ($('shMode').value !== 'zone') return num('shT');
@@ -2012,6 +2031,7 @@ function runShell(input, wantSTL, name, onProgress) {
     worker.postMessage({ id, input, wantSTL, name });
   });
 }
+function shellExtras(jaw, poses) { return { extracted: S.setupOpt[jaw].extracted || [], pontics: $('shPontic').checked ? ponticsFor(jaw, poses) : [] }; }
 function posesForStage(jaw, k) { return S.plan[jaw] ? posesAt(S.plan[jaw], Math.min(k, S.plan[jaw].N)) : new Map(); }
 $('shPreview').onclick = async () => {
   const jaw = $('shJaw').value;
@@ -2019,14 +2039,14 @@ $('shPreview').onclick = async () => {
   if (!arch) return alert(`${JAW_JA[jaw]}の歯モデルがありません`);
   busy(true, 'シェルを生成中…');
   try {
-    const input = shellInput(arch, posesForStage(jaw, S.stage), shellParams(), toothThickness);
+    const input = shellInput(arch, posesForStage(jaw, S.stage), shellParams(), toothThickness, shellExtras(jaw, posesForStage(jaw, S.stage)));
     const t0 = performance.now();
     const r = await runShell(input, false, '', (p, msg) => busy(true, `シェル生成: ${msg}`, p));
     viewer.clearGroup(`shell_${jaw}`);
     viewer.addMesh(`shell_${jaw}`, new Mesh(r.positions, r.indices), { color: COL.shell, opacity: 0.5, userData: { shell: jaw } });
     setVis('shell', true);
     const wt = r.check.watertight ? '<span class="ok">水密 OK</span>' : `<span class="danger">開いた辺 ${r.check.openEdges}・非多様体 ${r.check.nonManifoldEdges}</span>`;
-    $('shStatus').innerHTML = `${JAW_JA[jaw]} ステージ ${S.stage}: ${(r.indices.length / 3).toLocaleString()} 面, 体積 ${r.volume.toFixed(0)} mm³, ${wt}（${((performance.now() - t0) / 1000).toFixed(1)} 秒）`;
+    $('shStatus').innerHTML = `${r.voxelUsed && r.voxelUsed > num('shVoxel') + 1e-6 ? `（範囲が大きいためボクセル ${r.voxelUsed.toFixed(2)} mm で作成）` : ''}${JAW_JA[jaw]} ステージ ${S.stage}: ${(r.indices.length / 3).toLocaleString()} 面, 体積 ${r.volume.toFixed(0)} mm³, ${wt}（${((performance.now() - t0) / 1000).toFixed(1)} 秒）`;
   } catch (e) { alert(e.message); log(e.message, 'danger'); } finally { busy(false); }
 };
 $('shExport').onclick = async () => {
@@ -2043,7 +2063,7 @@ $('shExport').onclick = async () => {
     for (const jaw of jaws) {
       for (let k = from; k <= to; k++) {
         const name = `${id}_${jaw === 'upper' ? 'U' : 'L'}_S${String(k).padStart(2, '0')}`;
-        const input = shellInput(S.arches[jaw], posesForStage(jaw, k), shellParams(), toothThickness);
+        const input = shellInput(S.arches[jaw], posesForStage(jaw, k), shellParams(), toothThickness, shellExtras(jaw, posesForStage(jaw, k)));
         const r = await runShell(input, true, name, (p, msg) => busy(true, `${name}: ${msg}（${n + 1}/${total}）`, (n + p) / total));
         files.push({ name: `${name}.stl`, data: r.stl });
         if (!r.check.watertight) bad++;
@@ -2142,6 +2162,380 @@ async function loadDicomWithRestore(files) {
 }
 $('fileDicomDir').onchange = (e) => e.target.files.length && withBusy('DICOM 読込中…', () => loadDicomWithRestore(e.target.files));
 $('fileDicom').onchange = (e) => e.target.files.length && withBusy('DICOM 読込中…', () => loadDicomWithRestore(e.target.files));
+
+
+// ================================================================== ツール（ArchForm 相当の機能）
+const activeTeeth = (jaw) => { const a = S.arches[jaw]; const ex = S.setupOpt[jaw]?.extracted || []; return a ? [...a.teeth.keys()].filter((f) => !ex.includes(f)) : []; };
+const orderOf = (jaw) => { const act = activeTeeth(jaw); return archOrder(jaw, true).filter((f) => act.includes(f)); };
+/** 最終（目標）姿勢の写し */
+function finalPoses(jaw) {
+  const p = S.plan[jaw], m = new Map();
+  for (const f of activeTeeth(jaw)) m.set(f, { ...(p?.teeth[f]?.target || zeroPose()) });
+  return m;
+}
+/** 目標姿勢を更新（手で決めたステージングはできるだけ保つ。足りなければ終了ステージを延ばす） */
+function setTargets(jaw, targets) {
+  const p = S.plan[jaw];
+  if (!p) { S.plan[jaw] = autoStage(targets, { limits: readLimits(), strategy: $('stStrategy').value }); return; }
+  for (const [fdi, tgt] of targets) {
+    const tp = p.teeth[fdi] || (p.teeth[fdi] = { target: zeroPose(), start: 0, end: 0, keys: [] });
+    tp.target = { ...tgt };
+    const need = stagesNeeded(fdi, zeroPose(), tgt, p.limits);
+    if (tp.end - tp.start < need) tp.end = tp.start + need;
+  }
+  p.N = Math.max(1, ...Object.values(p.teeth).map((q) => q.end));
+}
+function afterTargetEdit() { S.stage = maxStage(); updatePoses(); renderStageTable(); renderMoveTable(); renderSetupReport(); }
+
+// ---- IPR・すき間の調整 ----
+/** fromFdi と、それより遠心の同じ側の歯を、遠心へ delta mm 動かす */
+function shiftSegment(jaw, T, fromFdi, delta) {
+  const q = Math.floor(fromFdi / 10), p0 = fromFdi % 10;
+  for (const f of activeTeeth(jaw)) if (Math.floor(f / 10) === q && f % 10 >= p0) { const t = T.get(f) || zeroPose(); t.md = (t.md || 0) - delta; T.set(f, t); }
+}
+/** 接触 a-b を delta mm 開く（負なら閉じる・食い込ませる＝IPR） */
+function adjustContact(jaw, a, b, delta) {
+  if (!S.plan[jaw]) return alert('先に自動排列（または移動）をしてください');
+  const T = finalPoses(jaw);
+  if (a % 10 === 1 && b % 10 === 1 && Math.floor(a / 10) !== Math.floor(b / 10)) { shiftSegment(jaw, T, a, delta / 2); shiftSegment(jaw, T, b, delta / 2); }
+  else shiftSegment(jaw, T, (a % 10) > (b % 10) ? a : b, delta);
+  setTargets(jaw, T);
+  afterTargetEdit();
+}
+/** IPR・すき間をなくす：正中から遠心へ、各接触がちょうど触れる位置まで動かす */
+function removeIprGap(jaw) {
+  const arch = S.arches[jaw];
+  for (let it = 0; it < 4; it++) {
+    const T = finalPoses(jaw);
+    const rep = contactReport(arch, T, orderOf(jaw));
+    const err = new Map(rep.map((c) => [`${c.a}-${c.b}`, c.overlap - (c.gap ?? 0)]));
+    const get = (a, b) => err.get(`${a}-${b}`) ?? err.get(`${b}-${a}`) ?? 0;
+    let maxE = 0;
+    for (const q of jaw === 'upper' ? [1, 2] : [4, 3]) {
+      const list = activeTeeth(jaw).filter((f) => Math.floor(f / 10) === q).sort((x, y) => (x % 10) - (y % 10));
+      let acc = 0;
+      list.forEach((f, i) => {
+        if (i === 0 && f % 10 === 1) { const other = activeTeeth(jaw).find((g) => g % 10 === 1 && g !== f); if (other) acc += get(f, other) / 2; }
+        if (i > 0) { const e = get(list[i - 1], f); acc += e; maxE = Math.max(maxE, Math.abs(e)); }
+        const t = T.get(f); t.md -= acc * 0.9;
+      });
+    }
+    setTargets(jaw, T);
+    if (maxE < 0.03) break;
+  }
+}
+
+// ---- IPR ラベル（ビュー上） ----
+let iprTimer = null;
+function scheduleIpr() { clearTimeout(iprTimer); iprTimer = setTimeout(updateIprLabels, 80); }
+function updateIprLabels() {
+  const ov = $('overlay');
+  ov.innerHTML = '';
+  S.iprLabels = [];
+  if (!S.vis.ipr) return;
+  for (const jaw of JAWS) {
+    const arch = S.arches[jaw];
+    if (!arch || !S.vis[jaw]) continue;
+    const poses = currentPoses(jaw);
+    const rep = contactReport(arch, poses, orderOf(jaw));
+    const P = (fdi, p) => mApply(poseMatrix(arch.teeth.get(fdi), poses.get(fdi) || zeroPose()), p);
+    for (const c of rep) {
+      const ta = arch.teeth.get(c.a), tb = arch.teeth.get(c.b);
+      const anchor = add(scale(add(P(c.a, ta.occlusalPoint), P(c.b, tb.occlusalPoint)), 0.5), scale(arch.frame.ez, 2.5));
+      const val = c.overlap > 0.02 ? -c.overlap : c.gap ?? 0;
+      const el = document.createElement('div');
+      el.style.cssText = 'position:absolute;transform:translate(-50%,-100%);display:flex;flex-direction:column;align-items:center;pointer-events:auto;font:600 11px system-ui';
+      const txt = Math.abs(val) < 0.05 ? '0' : (val > 0 ? '+' : '') + val.toFixed(1).replace(/^(-?)0\./, '$1.');
+      const color = val < -0.05 ? '#dc2626' : val > 0.05 ? '#16a34a' : '#475569';
+      el.innerHTML = `<button title="開く（+0.1mm）" style="padding:0 4px;line-height:1;color:#16a34a;background:#fff;border:1px solid #cbd5e1;border-radius:4px 4px 0 0">▲</button><span style="background:#fff;color:${color};border:1px solid #cbd5e1;border-top:0;border-bottom:0;padding:0 4px">${txt}</span><button title="閉じる（−0.1mm、IPR）" style="padding:0 4px;line-height:1;color:#dc2626;background:#fff;border:1px solid #cbd5e1;border-radius:0 0 4px 4px">▼</button>`;
+      const [up, , down] = el.children;
+      up.onclick = (e) => { e.stopPropagation(); adjustContact(jaw, c.a, c.b, 0.1); };
+      down.onclick = (e) => { e.stopPropagation(); adjustContact(jaw, c.a, c.b, -0.1); };
+      ov.append(el);
+      S.iprLabels.push({ el, anchor });
+    }
+  }
+  placeIprLabels();
+}
+function placeIprLabels() {
+  for (const L of S.iprLabels || []) {
+    const sp = viewer.toScreen(L.anchor);
+    if (!sp) { L.el.style.display = 'none'; continue; }
+    L.el.style.display = 'flex'; L.el.style.left = `${sp[0]}px`; L.el.style.top = `${sp[1]}px`;
+  }
+}
+viewer.frameHooks.push(placeIprLabels);
+
+// ---- 衝突（隣接歯・対合歯） ----
+let colTimer = null;
+function scheduleCollisions() { if (!S.vis.collide) { S.collideFlags = null; return; } if (window.__skipCol) return; clearTimeout(colTimer); colTimer = setTimeout(computeCollisions, 200); }
+function computeCollisions() {
+  const posed = [];
+  for (const jaw of JAWS) {
+    const arch = S.arches[jaw];
+    if (!arch) continue;
+    const poses = currentPoses(jaw);
+    for (const fdi of activeTeeth(jaw)) {
+      const t = arch.teeth.get(fdi);
+      const M = poseMatrix(t, poses.get(fdi) || zeroPose());
+      const P0 = t.crown.positions, N0 = t.crown.vertexNormals();
+      const P = new Float32Array(P0.length), N = new Float32Array(P0.length);
+      let c = [0, 0, 0];
+      for (let i = 0; i < P0.length; i += 3) {
+        const q = mApply(M, [P0[i], P0[i + 1], P0[i + 2]]); P.set(q, i);
+        N[i] = M[0] * N0[i] + M[4] * N0[i + 1] + M[8] * N0[i + 2]; N[i + 1] = M[1] * N0[i] + M[5] * N0[i + 1] + M[9] * N0[i + 2]; N[i + 2] = M[2] * N0[i] + M[6] * N0[i + 1] + M[10] * N0[i + 2];
+        c = add(c, q);
+      }
+      posed.push({ jaw, fdi, P, N, c: scale(c, 3 / P0.length), grid: null });
+    }
+  }
+  const flagsAll = {};
+  for (const A of posed) {
+    const flags = new Uint8Array(A.P.length / 3);
+    const others = posed.filter((B) => B !== A && Math.hypot(...sub(B.c, A.c)) < 14);
+    for (const B of others) {
+      B.grid = B.grid || new PointGrid(B.P, 0.8);
+      for (let i = 0; i < A.P.length; i += 3) {
+        const p = [A.P[i], A.P[i + 1], A.P[i + 2]];
+        const q = B.grid.nearest(p, 1.0);
+        if (!q || q.dist > 1.0) continue;
+        const j = 3 * q.index;
+        const sd = (p[0] - B.P[j]) * B.N[j] + (p[1] - B.P[j + 1]) * B.N[j + 1] + (p[2] - B.P[j + 2]) * B.N[j + 2];
+        if (sd < -0.05) flags[i / 3] = 2; else if (q.dist < 0.2 && flags[i / 3] < 1) flags[i / 3] = 1;
+      }
+    }
+    (flagsAll[A.jaw] = flagsAll[A.jaw] || new Map()).set(A.fdi, flags);
+  }
+  S.collideFlags = flagsAll;
+  // 色だけ更新（姿勢の再計算はしない）
+  const keep = S.vis.collide;
+  if (keep) { clearTimeout(colTimer); recolorOnly(); }
+}
+function recolorOnly() {
+  const save = scheduleCollisions;
+  // updatePoses の中で再び衝突計算を予約しないよう、一時的に何もしない関数に差し替える
+  window.__skipCol = true;
+  updatePoses();
+  window.__skipCol = false;
+  void save;
+}
+
+// ---- グリッド ----
+function drawGrid() {
+  viewer.clearGroup('grid');
+  if (!S.vis.grid) return;
+  const arch = S.arches.lower || S.arches.upper;
+  if (!arch) return;
+  const F = arch.frame;
+  for (const [size, div, color] of [[100, 100, 0xcbd5e1], [100, 10, 0x94a3b8]]) {
+    const g = new THREE.GridHelper(size, div, color, color);
+    g.material.transparent = true; g.material.opacity = div === 100 ? 0.35 : 0.7; g.material.depthWrite = false;
+    g.matrixAutoUpdate = false;
+    g.matrix.makeBasis(new THREE.Vector3(...F.ex), new THREE.Vector3(...F.ez), new THREE.Vector3(...F.ey)).setPosition(new THREE.Vector3(...F.origin));
+    viewer.group('grid').add(g);
+  }
+}
+
+// ---- 歯列弓の編集（ハンドル） ----
+const curveFromEdit = (e) => curveThrough(e.y0, e.xp, e.yp, e.xm, e.ym);
+const archLocal = (F, p) => { const d = sub(p, F.origin); return [dot(d, F.ex), dot(d, F.ey), dot(d, F.ez)]; };
+function startCurveEdit() {
+  const jaw = S.setJaw, arch = S.arches[jaw];
+  if (!arch) return alert(`${JAW_JA[jaw]}の歯モデルがありません`);
+  const rep = S.setupReport[jaw];
+  const c = S.setupOpt[jaw].customCurve ? new ArchCurveMain(S.setupOpt[jaw].customCurve.c0, S.setupOpt[jaw].customCurve.c2, S.setupOpt[jaw].customCurve.c4)
+    : rep?.curve ? new ArchCurveMain(rep.curve.c0, rep.curve.c2, rep.curve.c4) : previewArchCurve(arch, S.setupOpt[jaw]);
+  const avgX = (pos) => { const l = [...arch.teeth.values()].filter((t) => positionOf(t.fdi) === pos).map((t) => Math.abs(archLocal(arch.frame, t.centroid)[0])); return l.length ? l.reduce((a, b) => a + b, 0) / l.length : null; };
+  const xp = avgX(4) ?? avgX(5) ?? 15, xm = avgX(6) ?? avgX(7) ?? 24;
+  S.curveEdit = { jaw, y0: c.y(0), xp, yp: c.y(xp), xm, ym: c.y(xm) };
+  setMode('curve');
+  drawGuides();
+}
+function drawCurveHandles() {
+  viewer.clearGroup('curveHandles');
+  const e = S.curveEdit;
+  if (!e || S.mode !== 'curve') return;
+  const F = S.arches[e.jaw].frame;
+  const L = (x, y) => add(add(F.origin, scale(F.ex, x)), scale(F.ey, y));
+  const pts = [[0, e.y0, 0], [e.xp, e.yp, 1], [-e.xp, e.yp, 1], [e.xm, e.ym, 2], [-e.xm, e.ym, 2]];
+  for (const [x, y, idx] of pts) {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(1.3, 16, 10), new THREE.MeshBasicMaterial({ color: 0xd946ef, depthTest: false }));
+    m.position.set(...L(x, y)); m.renderOrder = 13; m.userData.handle = idx;
+    viewer.group('curveHandles').add(m);
+  }
+}
+viewer.canvas.addEventListener('pointerdown', (e) => {
+  if (S.mode !== 'curve' || e.button !== 0) return;
+  const hit = viewer.pick(e, [viewer.group('curveHandles')]);
+  if (hit) S.curveDrag = hit.object.userData.handle;
+});
+viewer.canvas.addEventListener('pointermove', (e) => {
+  if (S.mode !== 'curve' || S.curveDrag == null || !(e.buttons & 1)) return;
+  const ed = S.curveEdit, F = S.arches[ed.jaw].frame;
+  const r = viewer.rayAt(e);
+  const den = dot(r.d, F.ez);
+  if (Math.abs(den) < 1e-6) return;
+  const tt = dot(sub(F.origin, r.o), F.ez) / den;
+  const [x, y] = archLocal(F, add(r.o, scale(r.d, tt)));
+  if (S.curveDrag === 0) ed.y0 = y;
+  else if (S.curveDrag === 1) { ed.xp = Math.max(4, Math.min(ed.xm - 3, Math.abs(x))); ed.yp = y; }
+  else { ed.xm = Math.max(ed.xp + 3, Math.abs(x)); ed.ym = y; }
+  drawGuides();
+});
+window.addEventListener('pointerup', () => {
+  if (S.mode !== 'curve' || S.curveDrag == null) return;
+  S.curveDrag = null;
+  const ed = S.curveEdit, c = curveFromEdit(ed);
+  S.setupOpt[ed.jaw].customCurve = { c0: c.c0, c2: c.c2, c4: c.c4 };
+  withBusy('編集した歯列弓に並べ直し中…', async () => { runSetupFor(ed.jaw); afterPlanChange(true); setMode('curve'); drawGuides(); });
+});
+$('curveEdit').onclick = () => (S.mode === 'curve' ? setMode(null) : startCurveEdit());
+$('curveReset').onclick = () => {
+  const j = S.setJaw;
+  delete S.setupOpt[j].customCurve;
+  S.curveEdit = null; setMode(null);
+  if (S.arches[j]) withBusy('並べ直し中…', async () => { runSetupFor(j); afterPlanChange(true); });
+};
+$('removeIprGap').onclick = () => withBusy('IPR・すき間をなくしています…', async () => {
+  let any = false;
+  for (const j of JAWS) if (S.plan[j] && S.arches[j]) { removeIprGap(j); any = true; }
+  if (!any) return alert('先に自動排列をしてください');
+  afterTargetEdit();
+  log('IPR・すき間をなくしました（各接触が触れる位置に移動）', 'ok');
+});
+
+// ---- 咬合の移動（下顎全体） ----
+$('bsApply').onclick = () => {
+  const arch = S.arches.lower;
+  if (!arch) return alert('下顎の歯モデルがありません');
+  const F = arch.frame;
+  const left = [...arch.teeth.values()].filter((t) => Math.floor(t.fdi / 10) === 3).map((t) => archLocal(F, t.centroid)[0]);
+  const ls = left.length ? Math.sign(left.reduce((a, b) => a + b, 0)) || 1 : 1;
+  const d = add(add(scale(F.ey, num('bsAP')), scale(F.ez, num('bsV'))), scale(F.ex, ls * num('bsLat')));
+  const G = mTranslate(d);
+  const T = finalPoses('lower');
+  for (const [fdi, pose] of T) { const t = arch.teeth.get(fdi); T.set(fdi, matrixToPose(t, mMul(G, poseMatrix(t, pose)))); }
+  setTargets('lower', T);
+  afterTargetEdit();
+  log(`下顎全体を移動: 前後 ${num('bsAP')} / 上下 ${num('bsV')} / 左右 ${num('bsLat')} mm`, 'ok');
+};
+
+// ---- ポンティック ----
+function ponticsFor(jaw, poses) {
+  const arch = S.arches[jaw];
+  if (!arch || !S.setupOpt[jaw].keepMissingSpace) return [];
+  const act = activeTeeth(jaw), ex = S.setupOpt[jaw].extracted || [];
+  const out = [];
+  const Mof = (f) => poseMatrix(arch.teeth.get(f), poses.get(f) || zeroPose());
+  for (const q of jaw === 'upper' ? [1, 2] : [4, 3]) {
+    const maxP = Math.max(0, ...act.filter((f) => Math.floor(f / 10) === q).map((f) => f % 10));
+    for (let p = 1; p < maxP; p++) {
+      const fdi = q * 10 + p;
+      if (act.includes(fdi) || ex.includes(fdi)) continue;
+      let mes = null;
+      for (let k = p - 1; k >= 1; k--) if (act.includes(q * 10 + k)) { mes = q * 10 + k; break; }
+      if (!mes) { const oq = { 1: 2, 2: 1, 3: 4, 4: 3 }[q]; for (let k = 1; k <= 3; k++) if (act.includes(oq * 10 + k)) { mes = oq * 10 + k; break; } }
+      let dis = null;
+      for (let k = p + 1; k <= 8; k++) if (act.includes(q * 10 + k)) { dis = q * 10 + k; break; }
+      if (!mes || !dis) continue;
+      const tA = arch.teeth.get(mes), tB = arch.teeth.get(dis);
+      const cA = mApply(Mof(mes), tA.centroid), cB = mApply(Mof(dis), tB.centroid);
+      const oA = mApply(Mof(mes), tA.occlusalPoint), oB = mApply(Mof(dis), tB.occlusalPoint);
+      const z = arch.frame.ez;
+      const gap = Math.hypot(...sub(cB, cA)) - (tA.width + tB.width) / 2;
+      if (gap < 2) continue;
+      const info = toothInfo(fdi);
+      const a = gap / 2 - 0.1, b = (info.type === 'incisor' ? 6.5 : info.type === 'canine' ? 7.5 : info.type === 'premolar' ? 8.5 : 10) / 2, c = 4;
+      const mid = scale(add(cA, cB), 0.5), occ = scale(add(oA, oB), 0.5);
+      const center = add(mid, scale(z, dot(sub(occ, mid), z) - c - 0.5));
+      out.push({ fdi, mesh: ponticMesh(center, sub(cB, cA), z, a, b, c), center });
+    }
+  }
+  return out;
+}
+function drawPontics() {
+  for (const jaw of JAWS) {
+    viewer.clearGroup(`pontic_${jaw}`);
+    if (!S.arches[jaw]) continue;
+    for (const p of ponticsFor(jaw, currentPoses(jaw))) viewer.addMesh(`pontic_${jaw}`, p.mesh, { color: 0xe9d5ff, opacity: 0.85, userData: { pontic: p.fdi } });
+  }
+}
+
+// ---- 移動量の表 ----
+function renderMoveTable() {
+  const rows = [];
+  for (const jaw of JAWS) {
+    const p = S.plan[jaw];
+    if (!p) continue;
+    for (const fdi of orderOf(jaw)) {
+      const tg = p.teeth[fdi]?.target || zeroPose();
+      rows.push(`<tr><td>${fdi}</td>${POSE_KEYS.map((k) => `<td><input data-j="${jaw}" data-f="${fdi}" data-k="${k}" type="number" step="${k === 'md' || k === 'bl' || k === 'ext' ? 0.1 : 0.5}" value="${(tg[k] || 0).toFixed(2)}" style="width:52px"></td>`).join('')}<td>${stagesNeeded(fdi, zeroPose(), tg, p.limits)}</td></tr>`);
+    }
+  }
+  $('moveTable').innerHTML = rows.length ? `<tr><th>歯</th><th>近遠心</th><th>頬舌</th><th>挺出</th><th>チップ</th><th>トルク</th><th>捻転</th><th>段</th></tr>${rows.join('')}` : '<tr><td>自動排列のあとに表示されます</td></tr>';
+  for (const inp of $('moveTable').querySelectorAll('input')) {
+    inp.onchange = () => {
+      const jaw = inp.dataset.j, T = finalPoses(jaw);
+      T.get(+inp.dataset.f)[inp.dataset.k] = parseFloat(inp.value) || 0;
+      setTargets(jaw, T);
+      afterTargetEdit();
+    };
+  }
+}
+
+// ---- ステージング図 ----
+function drawStageChart() {
+  const cv = $('stageChart'), ctx = cv.getContext('2d');
+  const rowsT = [];
+  for (const jaw of JAWS) if (S.plan[jaw]) for (const f of orderOf(jaw)) rowsT.push({ jaw, fdi: f });
+  const N = maxStage();
+  if (!rowsT.length || !N) { ctx.clearRect(0, 0, cv.width, cv.height); return; }
+  const lw = 30, cw = Math.max(8, Math.min(20, Math.floor(560 / N))), rh = 12;
+  cv.width = lw + cw * N + 4; cv.height = 16 + rh * rowsT.length + 4;
+  const css = getComputedStyle(document.documentElement);
+  ctx.fillStyle = css.getPropertyValue('--bg'); ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.font = '9px system-ui'; ctx.fillStyle = css.getPropertyValue('--muted');
+  for (let k = 1; k <= N; k++) if (N <= 30 || k % 5 === 0) ctx.fillText(String(k), lw + (k - 1) * cw + 1, 10);
+  const ipr = new Map((S.iprSched || []).map((c) => [c.contact.split('-')[0], c.firstStage]));
+  rowsT.forEach(({ jaw, fdi }, r) => {
+    const y = 16 + r * rh;
+    ctx.fillStyle = css.getPropertyValue('--ink'); ctx.fillText(String(fdi), 2, y + 9);
+    const p = S.plan[jaw];
+    let prev = poseAt(p, fdi, 0);
+    for (let k = 1; k <= N; k++) {
+      const cur = poseAt(p, fdi, k);
+      let ratio = 0;
+      for (const key of POSE_KEYS) { const d = cur[key] - prev[key]; ratio = Math.max(ratio, Math.abs(d) / limitFor(fdi, key, d, p.limits)); }
+      prev = cur;
+      const x = lw + (k - 1) * cw;
+      ctx.fillStyle = ratio > 1.001 ? '#dc2626' : ratio > 0.01 ? `rgba(37,99,235,${0.2 + 0.8 * ratio})` : 'rgba(148,163,184,0.15)';
+      ctx.fillRect(x, y, cw - 1, rh - 1);
+      if (k === S.stage) { ctx.strokeStyle = '#f59e0b'; ctx.strokeRect(x - 0.5, y - 0.5, cw, rh); }
+    }
+    const st = ipr.get(String(fdi));
+    if (st != null && st >= 1) { const x = lw + (st - 1) * cw; ctx.fillStyle = '#facc15'; ctx.beginPath(); ctx.moveTo(x, y + rh - 1); ctx.lineTo(x + 5, y + rh - 1); ctx.lineTo(x + 2.5, y + 3); ctx.fill(); }
+  });
+  cv.onclick = (e) => {
+    const rc = cv.getBoundingClientRect();
+    const x = (e.clientX - rc.left) * (cv.width / rc.width), y = (e.clientY - rc.top) * (cv.height / rc.height);
+    const r = Math.floor((y - 16) / rh), k = Math.floor((x - lw) / cw) + 1;
+    if (r >= 0 && r < rowsT.length && k >= 1 && k <= N) { S.sel = rowsT[r].fdi; setStage(k); drawStageChart(); }
+  };
+}
+
+// ---- 歯のパネルのボタン ----
+$('toothExtract').onclick = () => {
+  const fdi = S.sel; if (!fdi) return alert('歯を選択してください');
+  const jaw = archOfFdi(fdi), o = S.setupOpt[jaw];
+  o.extracted = o.extracted || [];
+  const i = o.extracted.indexOf(fdi);
+  if (i >= 0) o.extracted.splice(i, 1); else o.extracted.push(fdi);
+  log(`${fdi} を${i >= 0 ? '排列に戻しました' : '抜歯として排列から外しました（スペースは閉じます）'}`, 'ok');
+  withBusy('並べ直し中…', async () => { runSetupFor(jaw); afterPlanChange(true); });
+};
+$('toothAxes').onclick = () => document.querySelector('#tabs button[data-step="roots"]').click();
+$('toothAttAdd').onclick = () => $('attAdd').click();
+$('toothAttDel').onclick = () => $('attClear').click();
 
 // ------------------------------------------------------------------ 初期化
 setSegJaw('upper');

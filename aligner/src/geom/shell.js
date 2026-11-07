@@ -102,8 +102,10 @@ export function generateShell(input, progress = () => {}) {
   const nm = margins.length / 3;
   const ML = new Float32Array(margins.length);
   for (let i = 0; i < nm; i++) { const l = toL(margins[3 * i], margins[3 * i + 1], margins[3 * i + 2]); ML.set(l, 3 * i); }
-  let wMarginMin = Infinity;
-  for (let i = 0; i < nm; i++) wMarginMin = Math.min(wMarginMin, ML[3 * i + 2]);
+  // 歯頸線の範囲（極端な外れ点は無視：口蓋や外周まで塗られた点などで範囲が膨らまないように）
+  const pctOf = (k, q) => { const a = []; for (let i = 0; i < nm; i++) a.push(ML[3 * i + k]); a.sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.max(0, Math.floor(a.length * q)))]; };
+  const wMarginMin = pctOf(2, 0.03);
+  const mU0 = pctOf(0, 0.005) - 6, mU1 = pctOf(0, 0.995) + 6, mV0 = pctOf(1, 0.005) - 6, mV1 = pctOf(1, 0.995) + 6;
   const tMax = Math.max(prm.thickness, ...teeth.map((t) => t.thickness || 0));
   const band = prm.clearance + tMax + 2 * prm.voxel;
   const wLow = wMarginMin - prm.trimOffset - 2 * prm.voxel - 0.5;
@@ -121,6 +123,8 @@ export function generateShell(input, progress = () => {}) {
       out.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
       if (Math.max(a[2], b[2], c[2]) > wLow) {
         for (const p of [a, b, c]) {
+          // 歯の近く（歯頸線の範囲＋6mm）だけを対象にする
+          if (p[0] < mU0 || p[0] > mU1 || p[1] < mV0 || p[1] > mV1) continue;
           if (p[0] < umin) umin = p[0]; if (p[0] > umax) umax = p[0];
           if (p[1] < vmin) vmin = p[1]; if (p[1] > vmax) vmax = p[1];
           if (p[2] > wmax) wmax = p[2];
@@ -129,14 +133,20 @@ export function generateShell(input, progress = () => {}) {
     }
     tris.push(Float32Array.from(out));
   }
-  const h = prm.voxel;
+  let h = prm.voxel;
   const pad = band + 2 * h;
   const u0 = umin - pad, v0 = vmin - pad, w0 = wLow;
-  const nx = Math.ceil((umax + pad - u0) / h) + 1;
-  const ny = Math.ceil((vmax + pad - v0) / h) + 1;
-  const nz = Math.ceil((wmax + pad - w0) / h) + 1;
+  const dims = (hh) => [Math.ceil((umax + pad - u0) / hh) + 1, Math.ceil((vmax + pad - v0) / hh) + 1, Math.ceil((wmax + pad - w0) / hh) + 1];
+  let [nx, ny, nz] = dims(h);
+  // 大きすぎるときは止めずに、ボクセルを少し粗くして作る（メモリ不足でブラウザが落ちないように）
+  const LIMIT = 70e6;
+  if (nx * ny * nz > LIMIT) {
+    h = Math.ceil(h * Math.cbrt((nx * ny * nz) / LIMIT) * 20) / 20;
+    [nx, ny, nz] = dims(h);
+    progress(0.04, `範囲が大きいためボクセルを ${h.toFixed(2)} mm にしました`);
+  }
   const N = nx * ny * nz;
-  if (N > 120e6) throw new Error(`ボクセル数が多すぎます (${(N / 1e6).toFixed(0)}M)。ボクセルサイズを大きくしてください。`);
+  if (N > 150e6) throw new Error(`作る範囲が大きすぎます (${(N / 1e6).toFixed(0)}M ボクセル)。歯の分割（歯頸線）に口蓋などが含まれていないか確認してください。`);
   progress(0.05, `グリッド ${nx}×${ny}×${nz}`);
   const JU = 1.234567e-4, JV = 2.345678e-4; // 柱の位置を僅かにずらしてレイが辺に当たるのを防ぐ
   const colU = (i) => u0 + i * h + JU, colV = (j) => v0 + j * h + JV;
@@ -264,7 +274,7 @@ export function generateShell(input, progress = () => {}) {
       const ci = Math.floor(u / cell), cj = Math.floor(v / cell);
       let best = Infinity, sw = 0, sh = 0;
       const cand = [];
-      for (let r = 0; r <= 6 && (best === Infinity || r <= 2); r++) {
+      for (let r = 0; r <= 6 && (best === Infinity || r <= (prm.trimStyle === 'straight' ? 3 : 2)); r++) {
         for (let di = -r; di <= r; di++) for (let dj = -r; dj <= r; dj++) {
           if (Math.max(Math.abs(di), Math.abs(dj)) !== r) continue;
           const a = mh.get(`${ci + di},${cj + dj}`);
@@ -277,6 +287,13 @@ export function generateShell(input, progress = () => {}) {
         }
       }
       if (best === Infinity) { trimW[i + nx * j] = 1e3; continue; }
+      if (prm.trimStyle === 'straight') {
+        // ストレート：近く（半径 5mm）の歯頸線の一番低い所（歯肉側）を結ぶ、なだらかな線
+        let mn = Infinity;
+        for (const [d2, w] of cand) if (d2 < 25 && w < mn) mn = w;
+        trimW[i + nx * j] = (mn === Infinity ? cand[0][1] : mn) - prm.trimOffset;
+        continue;
+      }
       const sig2 = 0.8 * 0.8;
       for (const [d2, w] of cand) {
         const g = Math.exp(-(d2 - best) / (2 * sig2));
@@ -330,5 +347,5 @@ export function generateShell(input, progress = () => {}) {
   }
   const check = checkWatertight(mesh);
   progress(1, '完了');
-  return { mesh, check, grid: [nx, ny, nz], volume: Math.abs(mesh.volume()) };
+  return { mesh, check, grid: [nx, ny, nz], volume: Math.abs(mesh.volume()), voxelUsed: h };
 }

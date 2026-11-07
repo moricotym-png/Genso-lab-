@@ -169,13 +169,15 @@ export function refreshTooth(arch, t) {
  * あるステージの姿勢でシェル生成用の入力を作る
  * poses: Map(fdi → pose)
  */
-export function shellInput(arch, poses, params, toothThickness) {
+export function shellInput(arch, poses, params, toothThickness, extras = {}) {
+  const extracted = extras.extracted || [];
   const mats = new Map();
   for (const [fdi, t] of arch.teeth) mats.set(fdi, poseMatrix(t, poses.get(fdi) || {}));
   const groups = [];
   const margins = [];
   const teethInfo = [];
   for (const [fdi, t] of arch.teeth) {
+    if (extracted.includes(fdi)) continue; // 抜歯した歯はアライナーに含めない
     const M = mats.get(fdi);
     const m = t.mesh.transformed(M);
     groups.push({ positions: m.positions, indices: m.indices });
@@ -185,6 +187,11 @@ export function shellInput(arch, poses, params, toothThickness) {
       const am = attachmentMesh(t, att).transformed(M);
       groups.push({ positions: am.positions, indices: am.indices });
     }
+  }
+  // ポンティック（欠損部のダミー歯冠）
+  for (const p of extras.pontics || []) {
+    groups.push({ positions: p.mesh.positions, indices: p.mesh.indices });
+    teethInfo.push({ center: p.center, thickness: toothThickness(p.fdi) });
   }
   const g = morphGingiva(arch.gingiva, mats);
   groups.push({ positions: g.positions, indices: g.indices });

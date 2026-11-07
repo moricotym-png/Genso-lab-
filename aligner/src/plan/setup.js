@@ -31,6 +31,8 @@ const localOf = (arch, p) => toArchLocal(arch.frame, p);
 
 /** 目標歯列弓を作る */
 function targetCurve(arch, opt, advance) {
+  // 手で形を決めた歯列弓（ハンドル編集）があればそれを使う
+  if (opt.customCurve) return new ArchCurve(opt.customCurve.c0, opt.customCurve.c2, opt.customCurve.c4);
   const F = arch.frame;
   const cur = F.curve;
   const teeth = [...arch.teeth.values()];
@@ -63,7 +65,8 @@ function targetCurve(arch, opt, advance) {
  */
 export function autoSetup(arch, options = {}) {
   const opt = { ...DEFAULT_SETUP, ...options };
-  const teeth = arch.teeth;
+  if (opt.customCurve) opt.lockAdvance = true; // 手で決めた弓の形を優先（前後位置を自動で変えない）
+  const teeth = new Map([...arch.teeth].filter(([f]) => !(opt.extracted || []).includes(f))); // 抜歯した歯は並べない
   const report = { warnings: [], ipr: [], sides: {} };
   // 前歯トルク変化による歯冠の前方移動を見込む
   const inc = [...teeth.values()].filter((t) => positionOf(t.fdi) === 1);
@@ -80,7 +83,7 @@ export function autoSetup(arch, options = {}) {
   const gapWidth = (s, posFrom, posTo) => {
     if (!opt.keepMissingSpace) return 0;
     let w = 0;
-    for (let p = posFrom + 1; p < posTo; p++) { const f = quadOf(s) * 10 + p; if (!teeth.has(f)) w += toothInfo(f).crownWidth; }
+    for (let p = posFrom + 1; p < posTo; p++) { const f = quadOf(s) * 10 + p; if (!teeth.has(f) && !(opt.extracted || []).includes(f)) w += toothInfo(f).crownWidth; } // 抜歯部は閉じる
     return w;
   };
   const missingList = [];
@@ -129,7 +132,7 @@ export function autoSetup(arch, options = {}) {
   }
   const centrals = [...teeth.values()].filter((t) => positionOf(t.fdi) === 1);
   const iprAt = (a, b) => (a && b ? iprPlan.get(`${a.fdi}-${b.fdi}`) || 0 : 0);
-  const order = archOrderOf(arch);
+  const order = archOrderOf(arch).filter((f) => teeth.has(f));
   const errOf = (err, a, b) => err.get(`${a.fdi}-${b.fdi}`) ?? err.get(`${b.fdi}-${a.fdi}`) ?? 0;
 
   /** 前後位置 adv で並べ、実際の歯冠形状で接触を詰める。残りの叢生(+)/空隙(-)を返す */
@@ -257,6 +260,14 @@ export function autoSetup(arch, options = {}) {
 }
 
 /** 設定から目標の歯列弓だけを計算（基準線のプレビュー用） */
+/** 3点（正中・小臼歯・大臼歯の x と y）を通る歯列弓 */
+export function curveThrough(y0, xp, yp, xm, ym) {
+  const a = xp * xp, b = xp ** 4, c = xm * xm, d = xm ** 4;
+  const det = a * d - b * c || 1e-9;
+  const r1 = yp - y0, r2 = ym - y0;
+  return new ArchCurve(y0, (r1 * d - b * r2) / det, (a * r2 - c * r1) / det);
+}
+
 export function previewArchCurve(arch, options = {}) {
   const opt = { ...DEFAULT_SETUP, ...options };
   return targetCurve(arch, opt, opt.anteriorAdvance || 0);

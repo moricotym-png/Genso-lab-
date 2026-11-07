@@ -6,7 +6,7 @@ self.onmessage = (e) => {
   const { id, input, wantSTL, name } = e.data;
   try {
     const r = generateShell(input, (p, msg) => self.postMessage({ id, progress: p, msg }));
-    const out = { id, done: true, positions: r.mesh.positions, indices: r.mesh.indices, check: r.check, volume: r.volume, grid: r.grid };
+    const out = { id, done: true, positions: r.mesh.positions, indices: r.mesh.indices, check: r.check, volume: r.volume, grid: r.grid, voxelUsed: r.voxelUsed };
     const transfer = [r.mesh.positions.buffer, r.mesh.indices.buffer];
     if (wantSTL) { out.stl = writeSTL(r.mesh, name); transfer.push(out.stl); }
     self.postMessage(out, transfer);

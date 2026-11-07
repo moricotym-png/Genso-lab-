@@ -67,8 +67,10 @@ export class Viewer {
     canvas.addEventListener('pointermove', (e) => { if (this.moveHandler && e.buttons === 1) this.moveHandler(e); });
     new ResizeObserver(() => this.resize()).observe(canvas.parentElement);
     this.resize();
+    this.frameHooks = [];
     const loop = () => {
       this.controls.update();
+      for (const f of this.frameHooks) f();
       this.renderer.render(this.scene, this.camera);
       requestAnimationFrame(loop);
     };
@@ -138,9 +140,30 @@ export class Viewer {
   view(dir) {
     const c = this.controls.target.clone();
     const dist = this.camera.position.distanceTo(c);
-    const v = { front: [0, -1, 0], top: [0, 0, 1], bottom: [0, 0, -1], left: [-1, 0, 0], right: [1, 0, 0] }[dir];
+    if (dir === 'home') { this.fit(); dir = 'front'; }
+    const v = { front: [0, -1, 0], back: [0, 1, 0], top: [0, 0, 1], bottom: [0, 0, -1], left: [-1, 0, 0], right: [1, 0, 0] }[dir];
     this.camera.position.set(c.x + v[0] * dist, c.y + v[1] * dist, c.z + v[2] * dist);
     this.camera.up.set(0, dir === 'top' || dir === 'bottom' ? 1 : 0, dir === 'top' || dir === 'bottom' ? 0 : 1);
+  }
+
+  /** データ座標の点 → 画面上の位置（px）。見えない（後ろ側）なら null */
+  toScreen(p) {
+    this.root.updateMatrixWorld(true);
+    const v = new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(this.root.matrixWorld).project(this.camera);
+    if (v.z > 1 || v.z < -1) return null;
+    const r = this.canvas.getBoundingClientRect();
+    return [((v.x + 1) / 2) * r.width, ((1 - v.y) / 2) * r.height];
+  }
+  /** 画面の点からの視線（データ座標） */
+  rayAt(e) {
+    const r = this.canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    this.raycaster.setFromCamera(ndc, this.camera);
+    this.root.updateMatrixWorld(true);
+    const inv = this.root.matrixWorld.clone().invert();
+    const o = this.raycaster.ray.origin.clone().applyMatrix4(inv);
+    const o2 = this.raycaster.ray.origin.clone().add(this.raycaster.ray.direction).applyMatrix4(inv);
+    return { o: [o.x, o.y, o.z], d: [o2.x - o.x, o2.y - o.y, o2.z - o.z] };
   }
 
   /** 画面座標で交差判定。objects 省略時は表示中の全メッシュ */

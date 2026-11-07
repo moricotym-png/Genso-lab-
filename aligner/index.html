@@ -265,6 +265,19 @@
       <div class="row"><label><input type="checkbox" id="optKeepMissing" checked> 欠損部のスペースを保持（インプラント・ブリッジ用。外すと閉じる）</label></div>
       <div class="row"><button id="runSetup" class="primary">自動排列</button><button id="runSetupBoth">上下とも</button><button id="fitOJOB">OJ/OB を目標へ</button></div>
       <div id="setupReport"></div>
+      <h2>ツール</h2>
+      <div class="row"><button id="curveEdit">歯列弓を編集（ハンドル）</button><button id="curveReset">弓の編集を解除</button></div>
+      <p class="note">黄色い歯列弓のハンドル（正中・小臼歯・大臼歯、左右対称）を左ドラッグで動かすと、その弓に沿って並べ直します。編集中は右ドラッグで回転。</p>
+      <div class="row"><button id="removeIprGap">IPR・すき間をなくす（接触させる）</button></div>
+      <h2>咬合の移動（Bite Shift・下顎）</h2>
+      <div class="row"><label>前後 (mm, +前方)</label><input type="number" id="bsAP" value="0" step="0.5"></div>
+      <div class="row"><label>上下 (mm, +上)</label><input type="number" id="bsV" value="0" step="0.5"></div>
+      <div class="row"><label>左右 (mm, +患者の左)</label><input type="number" id="bsLat" value="0" step="0.5"></div>
+      <div class="row"><button id="bsApply" class="primary">下顎全体を動かす</button></div>
+      <details id="moveTableBox"><summary><b>移動量の表（全歯・最終）</b></summary>
+        <p class="note">数値を直すと、その歯の最終位置が変わります（必要ならステージ数も延びます）。</p>
+        <div style="overflow-x:auto"><table id="moveTable"></table></div>
+      </details>
       <h2>目標位置の手修正</h2>
       <p class="note">ステージを最終にして、右パネルの数値・矢印、またはビューのギズモ（G / R キー）で歯を動かします。</p>
     </section>
@@ -282,6 +295,9 @@
       <div id="stagingReport"></div>
       <h2>歯ごとの開始・終了ステージ</h2>
       <table id="stageTable"></table>
+      <h2>ステージング図</h2>
+      <p class="note">行＝歯、列＝ステージ。青＝動いている（濃いほど上限に近い）、赤＝上限超え、▲黄＝IPR の時期。マスをクリックするとその歯・ステージへ移動。</p>
+      <div style="overflow-x:auto"><canvas id="stageChart" width="600" height="300" style="background:var(--bg);border-radius:6px"></canvas></div>
       <h2>アタッチメント（選択中の歯）</h2>
       <div class="row"><label>幅×高さ×厚み (mm)</label><input type="number" id="attW" value="3" step="0.5"><input type="number" id="attH" value="2" step="0.5"><input type="number" id="attD" value="1" step="0.25"></div>
       <div class="row"><button id="attAdd">頬側に追加</button><button id="attClear">削除</button></div>
@@ -301,6 +317,8 @@
       <div class="row"><label>平滑化（回）</label><input type="number" id="shSmooth" value="4" step="1"></div>
       <div class="row"><label>間引きの許容誤差 (mm, 0=しない)</label><input type="number" id="shDec" value="0.01" step="0.005"></div>
       <div class="row"><label><input type="checkbox" id="shBlock"> アンダーカットをブロックアウト</label></div>
+      <div class="row"><label>トリムラインの形</label><select id="shTrimStyle"><option value="scallop">スカラップ（歯頸線に沿う）</option><option value="straight">ストレート（歯肉側をなだらかに）</option></select></div>
+      <div class="row"><label><input type="checkbox" id="shPontic" checked> 欠損部にポンティックを入れる</label></div>
       <p class="note">数値は初期値です。材料・プリンターの推奨値と試作で確認してください（LuxCreo の資料では部位別厚みの例として前歯 0.5 mm・臼歯 0.8 mm が挙げられています）。</p>
       <h2>プレビュー</h2>
       <div class="row"><label>顎</label><select id="shJaw"><option value="upper">上顎</option><option value="lower">下顎</option></select><button id="shPreview" class="primary">現在のステージで生成</button></div>
@@ -318,6 +336,7 @@
 
   <main id="viewWrap">
     <canvas id="view"></canvas>
+    <div id="overlay" style="position:absolute;inset:0;pointer-events:none;overflow:hidden"></div>
     <div id="toolbar"></div>
     <div id="hint">左ドラッグ: 回転 / 右ドラッグ: 平行移動 / ホイール: 拡大</div>
   </main>
@@ -327,7 +346,8 @@
     <div id="toothTitle" class="status">なし</div>
     <div id="poseEditor"></div>
     <div class="row"><button id="gizmoT">移動ギズモ (G)</button><button id="gizmoR">回転ギズモ (R)</button><button id="gizmoOff">解除</button></div>
-    <div class="row"><button id="poseReset">この歯をリセット</button></div>
+    <div class="row"><button id="poseReset">移動をクリア</button><button id="toothExtract">抜歯（排列から外す）</button></div>
+    <div class="row"><button id="toothAxes">歯軸を編集</button><button id="toothAttAdd">アタッチメント追加</button><button id="toothAttDel">アタッチメント削除</button></div>
     <h2>移動量（初期 → 最終）</h2>
     <div id="toothTotals" class="kv"></div>
     <h2>このステージの接触</h2>

@@ -30,6 +30,7 @@ export const STRATEGIES = {
   asap: '同時に開始・最短で終了（歯ごとに最大速度）',
   posteriorFirst: '臼歯→小臼歯→前歯の順に開始（固定源を考慮）',
   anteriorFirst: '前歯から先に開始（叢生の解消を優先）',
+  seqDistal: '順次遠心移動（最後方歯から1本ずつ、V字型）',
 };
 
 /**
@@ -49,6 +50,28 @@ export function autoStage(targets, { limits = DEFAULT_LIMITS, strategy = 'simult
       teeth[fdi] = { target: { ...tgt }, start: 0, end: n === 0 ? 0 : strategy === 'asap' ? n : maxN, keys: [] };
     }
     N = maxN;
+  } else if (strategy === 'seqDistal') {
+    // 順次遠心移動：各側で最後方歯から1本ずつ動かし、前の歯が 2/3 進んだら次の歯を開始。前歯（1〜3）は最後にまとめて
+    const bySide = new Map();
+    for (const [fdi] of targets) { const q = Math.floor(fdi / 10); if (!bySide.has(q)) bySide.set(q, []); bySide.get(q).push(fdi); }
+    let anteriorStart = 0;
+    for (const list of bySide.values()) {
+      list.sort((a, b) => positionOf(b) - positionOf(a));
+      let at = 0;
+      for (const fdi of list) {
+        if (positionOf(fdi) <= 3) continue;
+        const n = need.get(fdi);
+        teeth[fdi] = { target: { ...targets.get(fdi) }, start: n ? at : 0, end: n ? at + n : 0, keys: [] };
+        if (n) at += Math.max(1, Math.round(n * (1 - Math.min(0.9, overlap ?? 0.33))));
+      }
+      anteriorStart = Math.max(anteriorStart, at);
+    }
+    for (const [fdi, tgt] of targets) {
+      if (positionOf(fdi) > 3) continue;
+      const n = need.get(fdi);
+      teeth[fdi] = { target: { ...tgt }, start: n ? anteriorStart : 0, end: n ? anteriorStart + n : 0, keys: [] };
+    }
+    N = Math.max(minStages, ...Object.values(teeth).map((t) => t.end));
   } else {
     // グループごとに開始をずらす
     const groupOf = (fdi) => { const p = positionOf(fdi); return p >= 6 ? 0 : p >= 4 ? 1 : 2; };
