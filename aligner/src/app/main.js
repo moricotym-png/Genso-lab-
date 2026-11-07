@@ -24,7 +24,7 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.13（歯根抽出の改良・基準線）';
+export const APP_VERSION = 'v0.14（初期の歯列と比較）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -54,7 +54,7 @@ const S = {
   setJaw: 'upper',
   mode: null,
   seedFdi: 17,
-  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: false, bone: false, skin: false, vr: true, cbct3d: true, slices: false, face: true, shell: true, guides: true },
+  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: false, bone: false, skin: false, vr: true, cbct3d: true, slices: false, face: true, shell: true, guides: true, ghost: false, heat: false },
 };
 
 const viewer = new Viewer($('view'));
@@ -109,13 +109,13 @@ $('tabs').addEventListener('click', (e) => {
 // ------------------------------------------------------------------ ツールバー
 const TOOLBAR = [
   ['upper', '上顎'], ['lower', '下顎'], ['scan', 'スキャン'], ['gingiva', '歯肉'], ['roots', '歯根'],
-  ['cbct3d', 'CBCT 立体'], ['slices', 'CBCT 断面'], ['face', '顔'], ['shell', 'アライナー'], ['guides', '基準線'],
+  ['cbct3d', 'CBCT 立体'], ['slices', 'CBCT 断面'], ['face', '顔'], ['shell', 'アライナー'], ['guides', '基準線'], ['ghost', '初期と重ねる'], ['heat', '移動量の色'],
 ];
 for (const [k, label] of TOOLBAR) {
   const b = document.createElement('button');
   b.textContent = label;
   b.classList.toggle('on', S.vis[k]);
-  b.onclick = () => { S.vis[k] = !S.vis[k]; b.classList.toggle('on', S.vis[k]); applyVisibility(); };
+  b.onclick = () => { S.vis[k] = !S.vis[k]; b.classList.toggle('on', S.vis[k]); applyVisibility(); if (k === 'heat' || k === 'ghost' || k === 'guides') { updatePoses(); updateHeatLegend(); } };
   b.dataset.vis = k;
   $('toolbar').append(b);
 }
@@ -134,6 +134,7 @@ function applyVisibility() {
     viewer.setVisible(`teeth_${j}`, show);
     viewer.setVisible(`ging_${j}`, show && S.vis.gingiva);
     viewer.setVisible(`shell_${j}`, show && S.vis.shell);
+    viewer.setVisible(`ghost_${j}`, show && !!S.vis.ghost && S.stage !== 0);
     for (const c of viewer.group(`teeth_${j}`).children) if (c.userData.root) c.visible = S.vis.roots;
   }
   viewer.setVisible('iso', S.vis.cbct3d && S.vis.iso);
@@ -484,10 +485,14 @@ const COL = { crown: 0xf4f0e4, crownSel: 0xffd36e, root: 0xd8c08a, cbctRoot: 0x7
 function drawArch(jaw) {
   viewer.clearGroup(`teeth_${jaw}`);
   viewer.clearGroup(`ging_${jaw}`);
+  viewer.clearGroup(`ghost_${jaw}`);
   const arch = S.arches[jaw];
   if (!arch) return;
   for (const [fdi, t] of arch.teeth) {
-    const crown = viewer.addMesh(`teeth_${jaw}`, t.crown, { color: fdi === S.sel ? COL.crownSel : 0xffffff, colors: t.crown.fromOld ? subColors(jaw, t.crown.fromOld, IVORY) : null, userData: { fdi, jaw, vc: !!t.crown.fromOld } });
+    const baseCol = t.crown.fromOld ? subColors(jaw, t.crown.fromOld, IVORY) : null;
+    const crown = viewer.addMesh(`teeth_${jaw}`, t.crown, { color: fdi === S.sel ? COL.crownSel : 0xffffff, colors: baseCol ? baseCol.slice() : null, userData: { fdi, jaw, vc: !!t.crown.fromOld, baseColors: baseCol } });
+    // 比較用：動かす前の歯冠（半透明の水色）
+    viewer.addMesh(`ghost_${jaw}`, t.crown, { color: 0x38bdf8, opacity: 0.3, userData: { fdi, jaw, ghost: true } });
     crown.matrixAutoUpdate = false;
     const rootIdx = t.mesh.indices.subarray(t.rootFaceStart * 3);
     const showFull = $('showCtTooth')?.checked && t.cbctTooth;
@@ -523,7 +528,24 @@ function updatePoses() {
     for (const c of viewer.group(`teeth_${jaw}`).children) {
       const M = mats.get(c.userData.fdi);
       if (M) { c.matrix.fromArray(M); c.matrixWorldNeedsUpdate = true; }
-      if (!c.userData.root && !c.userData.att) c.material.color.setHex(c.userData.fdi === S.sel ? COL.crownSel : c.userData.vc ? 0xffffff : COL.crown);
+      if (!c.userData.root && !c.userData.att) {
+        c.material.color.setHex(c.userData.fdi === S.sel ? COL.crownSel : c.userData.vc ? 0xffffff : COL.crown);
+        const col = c.geometry.attributes.color;
+        if (col && M && S.vis.heat) {
+          // 移動量の色：初期位置からの距離（0 mm 白 → 1.5 mm 黄 → 3 mm 以上 赤）
+          const P = c.geometry.attributes.position.array, A = col.array;
+          for (let i = 0; i < P.length; i += 3) {
+            const x = P[i], y = P[i + 1], z = P[i + 2];
+            const dx = M[0] * x + M[4] * y + M[8] * z + M[12] - x, dy = M[1] * x + M[5] * y + M[9] * z + M[13] - y, dz = M[2] * x + M[6] * y + M[10] * z + M[14] - z;
+            const d = Math.min(1, Math.hypot(dx, dy, dz) / 3);
+            const r = 1, g = d < 0.5 ? 1 - 0.15 * (d / 0.5) : 0.85 * (1 - (d - 0.5) / 0.5), b = d < 0.5 ? 1 - d / 0.5 : 0;
+            A[i] = r; A[i + 1] = g; A[i + 2] = b;
+          }
+          col.needsUpdate = true; c.userData.heatOn = true;
+        } else if (col && c.userData.heatOn && c.userData.baseColors) {
+          col.array.set(c.userData.baseColors); col.needsUpdate = true; c.userData.heatOn = false;
+        }
+      }
     }
     const gm = viewer.group(`ging_${jaw}`).children[0];
     if (gm) {
@@ -540,6 +562,15 @@ function updatePoses() {
   updatePosePanel();
   syncGizmo();
   drawGuides();
+  applyVisibility();
+  $('abToggle').classList.toggle('on', S.abSaved != null);
+}
+function updateHeatLegend() { $('heatLegend').style.display = S.vis.heat ? 'inline-flex' : 'none'; }
+// 初期 ⇄ 現在 の切り替え（見比べ用）
+function abToggle() {
+  if (S.abSaved != null) { S.stage = S.abSaved; S.abSaved = null; }
+  else { if (S.stage === 0) S.stage = maxStage(); else { S.abSaved = S.stage; S.stage = 0; } }
+  updatePoses();
 }
 const maxStage = () => Math.max(0, ...JAWS.map((j) => S.plan[j]?.N || 0));
 
@@ -1420,6 +1451,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'g' || e.key === 'G') gizmoMode('translate');
   else if (e.key === 'r' || e.key === 'R') gizmoMode('rotate');
   else if (e.key === 'Escape') { gizmoMode(null); setMode(null); }
+  else if (e.key === 'c' || e.key === 'C') abToggle();
   else if (e.key === 'ArrowRight') setStage(Math.min(maxStage(), S.stage + 1));
   else if (e.key === 'ArrowLeft') setStage(Math.max(0, S.stage - 1));
 });
@@ -1937,8 +1969,9 @@ $('exportCSV').onclick = () => {
 };
 
 // ステージのスライダー・再生
-function setStage(k) { S.stage = k; updatePoses(); }
+function setStage(k) { S.stage = k; S.abSaved = null; updatePoses(); }
 $('stage').oninput = () => setStage(parseInt($('stage').value, 10));
+$('abToggle').onclick = abToggle;
 let playTimer = null;
 $('play').onclick = () => {
   if (playTimer) { clearInterval(playTimer); playTimer = null; $('play').textContent = '▶'; return; }

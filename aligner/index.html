@@ -342,6 +342,8 @@
     <span>ステージ</span>
     <input type="range" id="stage" min="0" max="0" value="0">
     <span id="stageLabel">0 / 0</span>
+    <button id="abToggle" title="初期位置と今のステージを切り替え（C キー）">初期 ⇄ 現在 (C)</button>
+    <span id="heatLegend" style="display:none;align-items:center;gap:4px;font-size:12px">移動量 <span style="width:90px;height:10px;border-radius:3px;background:linear-gradient(90deg,#fff,#ffd900,#ff0000);display:inline-block;border:1px solid var(--line)"></span> 0 → 3mm 以上</span>
   </footer>
 </div>
 <div id="busy"><div class="box"><div id="busyMsg">処理中…</div><progress id="busyBar" max="1" value="0"></progress></div></div>
