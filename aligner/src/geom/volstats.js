@@ -50,7 +50,7 @@ function thresholdsFromSamples(s) {
   // 皮膚の面は「空気の代表値」と「軟組織の代表値」の中間に置く（ノイズの影響を受けにくい）
   const medIn = (a, b) => { let i0 = 0, i1 = s.length; while (i0 < s.length && s[i0] < a) i0++; i1 = i0; while (i1 < s.length && s[i1] < b) i1++; return i1 > i0 ? s[(i0 + i1) >> 1] : (a + b) / 2; };
   const air = medIn(lo, t1), soft = medIn(t1, t2);
-  return { skin: (air + soft) / 2, bone: t2, teeth: t3, max: hi };
+  return { skin: (air + soft) / 2, bone: t2, teeth: t3, max: hi, min: lo, air, soft };
 }
 
 export function volumeThresholds(vol) {

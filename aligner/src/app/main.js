@@ -1,5 +1,5 @@
 // Aligner Studio — 画面とワークフロー
-import { Viewer, LABEL_COLORS, makeSliceMesh, meshToGeometry, THREE } from './viewer.js';
+import { Viewer, LABEL_COLORS, makeSliceMesh, meshToGeometry, makeVolumeMesh, THREE } from './viewer.js';
 import { Mesh, mergeMeshes } from '../core/mesh.js';
 import { mApply, mMul, mInvRigid, mTranslate, mIdentity, sub, add, scale, dot, norm, cross } from '../core/vec.js';
 import { parseSTL, writeSTL } from '../io/stl.js';
@@ -22,7 +22,7 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.6（骨の表示・しきい値調整）';
+export const APP_VERSION = 'v0.7（ボリューム表示）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -45,7 +45,7 @@ const S = {
   setJaw: 'upper',
   mode: null,
   seedFdi: 17,
-  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: true, bone: true, skin: false, cbct3d: true, slices: false, face: true, shell: true },
+  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: false, bone: false, skin: false, vr: true, cbct3d: true, slices: false, face: true, shell: true },
 };
 
 const viewer = new Viewer($('view'));
@@ -130,6 +130,7 @@ function applyVisibility() {
   viewer.setVisible('iso', S.vis.cbct3d && S.vis.iso);
   viewer.setVisible('bone', S.vis.cbct3d && !!S.vis.bone);
   viewer.setVisible('skin', S.vis.cbct3d && !!S.vis.skin);
+  viewer.setVisible('vr', S.vis.cbct3d && !!S.vis.vr);
   viewer.setVisible('slices', S.vis.slices);
   viewer.setVisible('face', S.vis.face);
 }
@@ -197,10 +198,10 @@ async function setVolume(vol, { autoAlign = false, fails = 0 } = {}) {
   $('boneThr').value = Math.round(th.bone);
   $('skinThr').value = Math.round(th.skin);
   S.cbct.thr.range = th.max - th.skin;
-  // 基準点を打てるよう、骨の立体を最初から表示
-  busy(true, '骨の立体を作成中…', 0.97); await tick();
-  ensureBone();
-  S.vis.bone = true; setVis('cbct3d', true);
+  // CT 全体をボリュームレンダリングで表示（しきい値はスライダーで即時に変えられる）
+  busy(true, 'ボリューム表示を準備中…', 0.97); await tick();
+  buildVR(th);
+  S.vis.iso = false; S.vis.bone = false; S.vis.vr = true; setVis('cbct3d', true);
   redrawCbctExtras();
   renderLmTables();
   if (!autoAlign) log('CBCT を読み込みました。「2 位置合わせ」で基準点を打って合わせてください', 'ok');
@@ -617,8 +618,10 @@ function lmPick(e) {
   if (t.side === 'cbct') {
     if (!S.cbct) return alert('先に CBCT を読み込んでください');
     const hit = viewer.pick(e, ['iso', 'bone', 'skin', 'slices'].map((g) => viewer.group(g)));
-    if (!hit) return;
-    const p = mApply(mInvRigid(S.cbct.M), [hit.point.x, hit.point.y, hit.point.z]);
+    const vh = pickVolume(e);
+    let p = hit ? mApply(mInvRigid(S.cbct.M), [hit.point.x, hit.point.y, hit.point.z]) : null;
+    if (vh && (!hit || vh.dist < hit.distance)) p = vh.cbct;
+    if (!p) return;
     if (t.set === 'ref') S.lm.ref[t.idx] = p; else S.lm[t.set][t.idx].cbct = p;
   } else if (t.side === 'scan') {
     const hit = viewer.pick(e, JAWS.flatMap((j) => [viewer.group(`scan_${j}`), viewer.group(`teeth_${j}`)]));
@@ -778,6 +781,8 @@ function wholeIso(thr) {
 function ensureSkin() { if (!S.cbct.skin) { S.cbct.skin = wholeIso(num('skinThr')); log(`皮膚の立体: しきい値 ${num('skinThr')}`); } }
 function ensureBone() { if (!S.cbct.bone) { S.cbct.bone = wholeIso(num('boneThr')); log(`骨の立体: しきい値 ${num('boneThr')}（${S.cbct.bone.nf.toLocaleString()} 面）`); } }
 function redrawCbctExtras() {
+  updateVRMatrix();
+  $('vrToggle').classList.toggle('on', !!S.vis.vr);
   for (const [g, key, color, op] of [['bone', 'bone', 0xeee6d2, num('boneOpacity')], ['skin', 'skin', 0xf0c8b0, num('skinOpacity')]]) {
     viewer.clearGroup(g);
     if (S.cbct?.[key]) viewer.addMesh(g, S.cbct[key], { color, opacity: op, matrix: S.cbct.M, doubleSide: true });
@@ -787,6 +792,66 @@ function redrawCbctExtras() {
   $('showSkin').classList.toggle('on', !!S.vis.skin);
   $('toggleSlices').classList.toggle('on', !!S.vis.slices);
   $('showTeethIso').classList.toggle('on', !!S.vis.iso);
+}
+// ---- ボリューム表示 ----
+function buildVR(th) {
+  if (S.cbct.vrObj) { viewer.clearGroup('vr'); S.cbct.vrObj.dispose(); }
+  const range = { lo: th.min, hi: th.max };
+  S.cbct.vrObj = makeVolumeMesh(S.cbct.vol, range);
+  viewer.group('vr').add(S.cbct.vrObj.mesh);
+  const sl = $('vrThr');
+  sl.min = Math.floor(range.lo); sl.max = Math.ceil(range.hi); sl.step = Math.max(1, Math.round((range.hi - range.lo) / 400));
+  S.cbct.presets = {
+    bone: { thr: th.soft + 0.5 * (th.bone - th.soft), width: Math.max(50, (th.bone - th.soft) * 0.6), opacity: 0.6 },
+    skin: { thr: th.skin, width: Math.max(50, (th.soft - th.air) * 0.3), opacity: 0.35 },
+  };
+  applyVRPreset('bone');
+}
+function applyVRPreset(name) {
+  const p = S.cbct?.presets?.[name];
+  if (!p) return;
+  $('vrThr').value = Math.round(p.thr); $('vrWidth').max = Math.ceil((S.cbct.thr.max - S.cbct.thr.min) / 2); $('vrWidth').value = Math.round(p.width); $('vrOpacity').value = p.opacity;
+  S.cbct.vrPreset = name;
+  updateVRParams();
+}
+function updateVRParams() {
+  const o = S.cbct?.vrObj;
+  if (!o) return;
+  o.uniforms.uThr.value = num('vrThr'); o.uniforms.uWidth.value = num('vrWidth'); o.uniforms.uOpacity.value = num('vrOpacity');
+  $('vrThrVal').textContent = Math.round(num('vrThr'));
+  const skin = S.cbct.vrPreset === 'skin';
+  o.uniforms.uColLow.value.set(skin ? 0xe8b9a0 : 0xd9c7a8); o.uniforms.uColHigh.value.set(skin ? 0xf4d7c4 : 0xfbf7ee);
+}
+function updateVRMatrix() { if (S.cbct?.vrObj) S.cbct.vrObj.setMatrix(mMul(S.cbct.M, volumeMatrix(S.cbct.vol))); }
+for (const id of ['vrThr', 'vrWidth', 'vrOpacity']) $(id).oninput = updateVRParams;
+$('vrBone').onclick = () => { applyVRPreset('bone'); S.vis.vr = true; setVis('cbct3d', true); redrawCbctExtras(); };
+$('vrSkin').onclick = () => { applyVRPreset('skin'); S.vis.vr = true; setVis('cbct3d', true); redrawCbctExtras(); };
+$('vrToggle').onclick = () => { S.vis.vr = !S.vis.vr; if (S.vis.vr) setVis('cbct3d', true); redrawCbctExtras(); };
+/** ボリューム表示へのピック：視線に沿って CT をたどり、表示のしきい値（下端）を最初に超えた点 */
+function pickVolume(e) {
+  if (!S.cbct?.vrObj || !S.vis.vr || !S.vis.cbct3d) return null;
+  const r = viewer.canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  viewer.raycaster.setFromCamera(ndc, viewer.camera);
+  viewer.root.updateMatrixWorld(true);
+  const toData = viewer.root.matrixWorld.clone().invert();
+  const o = viewer.raycaster.ray.origin.clone().applyMatrix4(toData);
+  const o2 = viewer.raycaster.ray.origin.clone().add(viewer.raycaster.ray.direction).applyMatrix4(toData);
+  const inv = mInvRigid(S.cbct.M);
+  const oc = mApply(inv, [o.x, o.y, o.z]), oc2 = mApply(inv, [o2.x, o2.y, o2.z]);
+  const d = norm(sub(oc2, oc));
+  const vol = S.cbct.vol, Mv = volumeMatrix(vol);
+  const lim = num('vrThr') - 0.25 * num('vrWidth');
+  // ボリュームの外接球の範囲だけ進む
+  const c = mApply(Mv, vol.dims.map((n) => (n - 1) / 2));
+  const R = Math.hypot(...vol.dims.map((n, a) => n * vol.spacing[a])) / 2;
+  const tc = dot(sub(c, oc), d);
+  const step = Math.min(...vol.spacing) * 0.5;
+  for (let t = Math.max(0, tc - R); t < tc + R; t += step) {
+    const p = add(oc, scale(d, t));
+    if (sampleVolume(vol, p) >= lim) return { cbct: p, dist: t };
+  }
+  return null;
 }
 $('showBone').onclick = () => {
   if (!S.cbct) return alert('先に CBCT を読み込んでください');

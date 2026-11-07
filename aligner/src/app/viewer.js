@@ -251,3 +251,111 @@ export function makeSliceMesh(vol, axis, index, wl, ww, toWorld) {
 }
 
 export { THREE };
+
+// ---------------------------------------------------------------- ボリュームレンダリング
+const VR_VERT = /* glsl */`
+out vec3 vPos;
+void main() {
+  vPos = position;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+const VR_FRAG = /* glsl */`
+precision highp float;
+precision highp sampler3D;
+in vec3 vPos;
+out vec4 outColor;
+uniform sampler3D uVol;
+uniform vec3 uCam;
+uniform vec3 uSize;
+uniform float uLo, uHi, uThr, uWidth, uOpacity;
+uniform vec3 uColLow, uColHigh;
+vec2 hitBox(vec3 o, vec3 d) {
+  vec3 inv = 1.0 / d;
+  vec3 t0 = (vec3(0.0) - o) * inv, t1 = (vec3(1.0) - o) * inv;
+  vec3 tmin = min(t0, t1), tmax = max(t0, t1);
+  return vec2(max(max(tmin.x, tmin.y), tmin.z), min(min(tmax.x, tmax.y), tmax.z));
+}
+float val(vec3 p) { return uLo + texture(uVol, p).r * (uHi - uLo); }
+void main() {
+  vec3 d = normalize(vPos - uCam);
+  vec2 b = hitBox(uCam, d);
+  b.x = max(b.x, 0.0);
+  if (b.x >= b.y) discard;
+  float dt = 0.6 / max(max(uSize.x, uSize.y), uSize.z);
+  vec3 e = 1.0 / uSize;
+  vec4 acc = vec4(0.0);
+  float lo = uThr - 0.5 * uWidth;
+  for (int i = 0; i < 1600; i++) {
+    float t = b.x + (float(i) + 0.5) * dt;
+    if (t > b.y || acc.a > 0.97) break;
+    vec3 p = uCam + d * t;
+    float v = val(p);
+    float a = clamp((v - lo) / max(uWidth, 1.0), 0.0, 1.0);
+    if (a < 0.01) continue;
+    a = a * a * uOpacity;
+    vec3 g = vec3(val(p + vec3(e.x, 0, 0)) - val(p - vec3(e.x, 0, 0)), val(p + vec3(0, e.y, 0)) - val(p - vec3(0, e.y, 0)), val(p + vec3(0, 0, e.z)) - val(p - vec3(0, 0, e.z)));
+    float shade = 0.3 + 0.7 * abs(dot(normalize(g + 1e-6), d));
+    vec3 col = mix(uColLow, uColHigh, clamp((v - uThr) / max(uWidth, 1.0), 0.0, 1.0)) * shade;
+    acc.rgb += (1.0 - acc.a) * a * col;
+    acc.a += (1.0 - acc.a) * a;
+  }
+  if (acc.a < 0.01) discard;
+  outColor = vec4(acc.rgb / acc.a, acc.a);
+}`;
+
+/**
+ * CT をボリュームレンダリングするメッシュ
+ * @param vol     buildVolume の戻り値
+ * @param range   { lo, hi }  8bit に詰める値の範囲（埋め値は lo 未満として 0 になる）
+ * @param modelM  4x4（列優先）: インデックス座標 → 表示座標（= 位置合わせ行列 × ボリューム行列）
+ */
+export function makeVolumeMesh(vol, range) {
+  const [nx, ny, nz] = vol.dims;
+  const src = vol.data;
+  const u8 = new Uint8Array(src.length);
+  const s = 255 / (range.hi - range.lo);
+  for (let i = 0; i < src.length; i++) {
+    const v = (src[i] - range.lo) * s;
+    u8[i] = v <= 0 ? 0 : v >= 255 ? 255 : v;
+  }
+  const tex = new THREE.Data3DTexture(u8, nx, ny, nz);
+  tex.format = THREE.RedFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.minFilter = tex.magFilter = THREE.LinearFilter;
+  tex.unpackAlignment = 1;
+  tex.needsUpdate = true;
+  const geo = new THREE.BoxGeometry(1, 1, 1);
+  geo.translate(0.5, 0.5, 0.5);
+  const uniforms = {
+    uVol: { value: tex }, uCam: { value: new THREE.Vector3() }, uSize: { value: new THREE.Vector3(nx, ny, nz) },
+    uLo: { value: range.lo }, uHi: { value: range.hi }, uThr: { value: 0 }, uWidth: { value: 200 }, uOpacity: { value: 0.5 },
+    uColLow: { value: new THREE.Color(0.93, 0.72, 0.62) }, uColHigh: { value: new THREE.Color(0.98, 0.96, 0.9) },
+  };
+  const mat = new THREE.ShaderMaterial({
+    glslVersion: THREE.GLSL3, vertexShader: VR_VERT, fragmentShader: VR_FRAG, uniforms,
+    side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.matrixAutoUpdate = false;
+  mesh.renderOrder = 5;
+  mesh.frustumCulled = false;
+  const inv = new THREE.Matrix4();
+  mesh.onBeforeRender = (r, sc, cam) => {
+    inv.copy(mesh.matrixWorld).invert();
+    uniforms.uCam.value.setFromMatrixPosition(cam.matrixWorld).applyMatrix4(inv);
+  };
+  mesh.userData.vr = true;
+  return {
+    mesh, uniforms,
+    /** model: インデックス座標 → 表示座標 */
+    setMatrix(model) {
+      // 単位立方体 [0,1]^3 → インデックス [-0.5, n-0.5]
+      const m = new THREE.Matrix4().fromArray(model)
+        .multiply(new THREE.Matrix4().makeTranslation(-0.5, -0.5, -0.5))
+        .multiply(new THREE.Matrix4().makeScale(nx, ny, nz));
+      mesh.matrix.copy(m);
+      mesh.matrixWorldNeedsUpdate = true;
+    },
+    dispose() { tex.dispose(); geo.dispose(); mat.dispose(); },
+  };
+}
