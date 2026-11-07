@@ -213,8 +213,14 @@
       <div class="row"><label>歯軸補正 近遠心 (°)</label><input type="number" id="axTip" step="1"></div>
       <div class="row"><label>歯軸補正 頬舌 (°)</label><input type="number" id="axTorque" step="1"></div>
       <button id="rootApply" class="primary">反映</button>
-      <h2>CBCT から歯根を自動抽出</h2>
+      <h2>CBCT から歯を自動抽出（歯根＋歯冠）</h2>
       <div class="row"><button id="autoRootSel" class="primary">選択中の歯</button><button id="autoRootAll" class="primary">全ての歯</button><button id="autoRootClear">抽出した歯根を消す</button></div>
+      <div class="row"><label><input type="checkbox" id="showCtTooth"> CT の歯を丸ごと（歯冠＋歯根）表示</label></div>
+      <h2>CT の歯冠でスキャンの歯冠を補正</h2>
+      <p class="note">CT から取り出した歯の表面に重なるスキャンの部分を、その歯として塗り直します。歯冠が一部しか取れていない・境界がずれている歯が直ります。認識されなかった歯は、先に「3 歯の分割」の塗りつぶしで大まかに塗ってから抽出してください。</p>
+      <div class="row"><label>重なりとみなす距離 (mm)</label><input type="number" id="ctRelabelTol" value="0.5" step="0.1" min="0.2" max="2"></div>
+      <div class="row"><button id="ctRelabel" class="primary">CT で歯冠を補正して歯を作り直す</button></div>
+      <div class="status" id="ctRelabelStatus"></div>
       <div class="row"><label><input type="checkbox" id="autoRootAxis" checked> 歯軸も CBCT の歯根に合わせる</label></div>
       <div class="row"><label>しきい値の位置（0=周囲寄り〜1=歯寄り）</label><input type="number" id="autoRootK" value="0.4" step="0.05" min="0.1" max="0.9"></div>
       <div class="status" id="autoRootStatus">先に「2 位置合わせ」でスキャンと CBCT を合わせてください。</div>

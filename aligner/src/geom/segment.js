@@ -44,7 +44,8 @@ class Heap {
 export function segmentTeeth(mesh, seeds, opts = {}) {
   const { concavityWeight = 4.0, autoGingivaBoundary = true, occlusal = null, gingivaBelow = null } = opts;
   const nv = mesh.nv;
-  const K = mesh.curvature(2);
+  // 点の細かさに合わせて曲率をなめらかにする（細かいスキャンほどノイズが多いので回数を増やす）
+  const K = mesh.curvature(smoothItersFor(mesh));
   // 「高さ」= 凹み具合。凸面は 0
   const H = new Float32Array(nv);
   let kscale = 0;
@@ -61,7 +62,26 @@ export function segmentTeeth(mesh, seeds, opts = {}) {
   const cand = new Int32Array(nv).fill(-1);
   for (const s of seeds) { cand[s.vertex] = s.label; heap.push(0, s.vertex); }
   if (autoGingivaBoundary) {
-    for (const loop of mesh.boundaryLoops()) for (const v of loop) if (cand[v] < 0) { cand[v] = 0; heap.push(0, v); }
+    // スキャンの外周だけを歯肉の目印にする（歯冠の中の小さな穴の縁は使わない）
+    const loops = mesh.boundaryLoops();
+    const maxLen = loops.length ? loops[0].length : 0;
+    for (const loop of loops) {
+      if (loop.length < Math.max(50, maxLen * 0.2)) continue;
+      for (const v of loop) if (cand[v] < 0) { cand[v] = 0; heap.push(0, v); }
+    }
+  }
+  // 歯冠のシードより十分低い（歯根側の）点も歯肉の目印にする
+  {
+    const toothSeeds = seeds.filter((s0) => s0.label > 0).map((s0) => s0.vertex);
+    if (toothSeeds.length >= 3) {
+      const N = mesh.vertexNormals();
+      let o = [0, 0, 0];
+      for (const v of toothSeeds) { o[0] += N[3 * v]; o[1] += N[3 * v + 1]; o[2] += N[3 * v + 2]; }
+      const l = Math.hypot(...o) || 1; o = o.map((x) => x / l);
+      const hOf = (v) => P[3 * v] * o[0] + P[3 * v + 1] * o[1] + P[3 * v + 2] * o[2];
+      const low = Math.min(...toothSeeds.map(hOf)) - 9.5;
+      for (let i = 0; i < nv; i++) if (cand[i] < 0 && hOf(i) < low) { cand[i] = 0; heap.push(0, i); }
+    }
   }
   // 咬合方向が分かる場合：歯冠シードより十分低い頂点を歯肉シードに
   if (occlusal && gingivaBelow !== null) {
@@ -90,6 +110,18 @@ export function segmentTeeth(mesh, seeds, opts = {}) {
   for (let i = 0; i < nv; i++) if (labels[i] < 0) labels[i] = 0;
   if (!opts.noCleanup) cleanupLabels(mesh, labels);
   return labels;
+}
+
+/** 平均の辺の長さから、曲率のなめらかさ（反復回数）を決める。約 0.6mm の範囲をならす */
+export function smoothItersFor(mesh) {
+  const I = mesh.indices, P = mesh.positions;
+  let s = 0, n = 0;
+  for (let f = 0; f < I.length && n < 3000; f += 3 * Math.max(1, Math.floor(I.length / 9000))) {
+    const a = 3 * I[f], b = 3 * I[f + 1];
+    s += Math.hypot(P[a] - P[b], P[a + 1] - P[b + 1], P[a + 2] - P[b + 2]); n++;
+  }
+  const e = n ? s / n : 0.3;
+  return Math.max(2, Math.min(40, Math.round((0.6 / e) ** 2)));
 }
 
 /** 多数決フィルタ＋小島の除去 */
@@ -152,7 +184,7 @@ export function faceLabels(mesh, labels) {
 
 /** 凹み具合（0=平ら・凸、大きいほど深いくぼみ＝歯頸線・歯間）。手塗りの境界判定に使う */
 export function concavity(mesh) {
-  const K = mesh.curvature(2);
+  const K = mesh.curvature(smoothItersFor(mesh));
   const a = [];
   for (let i = 0; i < K.length; i += Math.max(1, Math.floor(K.length / 20000))) a.push(Math.abs(K[i]));
   a.sort((x, y) => x - y);
@@ -206,4 +238,60 @@ export function labelCounts(labels) {
   const m = new Map();
   for (let i = 0; i < labels.length; i++) m.set(labels[i], (m.get(labels[i]) || 0) + 1);
   return m;
+}
+
+/**
+ * CT から取り出した歯（歯冠＋歯根、スキャン座標）を使って、スキャンの歯冠の範囲を塗り直す
+ *  - 歯肉になっている点のうち、CT の歯の表面から tol 以内 → その歯（最も近い歯）に加える
+ *  - その歯として塗られているのに、CT のその歯から tol×2.5 以上離れている点 → 歯肉に戻す
+ *  - 歯と歯の間の付け替えはしない（隣の CT の歯との境目がずれていても、隣の歯冠を奪わない）
+ * ctTeeth: [{ fdi, mesh }]、grids はスキャン側で作った PointGrid クラス
+ * 戻り値: { labels(新しい配列), added, removed }
+ */
+export function relabelFromCT(scan, labels, ctTeeth, PointGrid, tol = 0.5) {
+  const out = Int32Array.from(labels);
+  const allP = [], allN = [], owner = [];
+  const per = new Map();
+  for (const { fdi, mesh } of ctTeeth) {
+    const P = mesh.positions, Nn = mesh.vertexNormals();
+    for (let i = 0; i < P.length; i += 3) { allP.push(P[i], P[i + 1], P[i + 2]); allN.push(Nn[i], Nn[i + 1], Nn[i + 2]); owner.push(fdi); }
+    per.set(fdi, new PointGrid(P, 1.0));
+  }
+  if (!allP.length) return { labels: out, added: 0, removed: 0, skipped: [] };
+  const grid = new PointGrid(Float32Array.from(allP), 1.0);
+  const SP = scan.positions, SN = scan.vertexNormals();
+  // 歯ごとに変更候補を集め、変化が大きすぎる歯（CT の歯冠のずれが疑われる）は採用しない
+  const addBy = new Map(), remBy = new Map();
+  const before = labelCounts(labels);
+  for (let v = 0; v < scan.nv; v++) {
+    const p = [SP[3 * v], SP[3 * v + 1], SP[3 * v + 2]];
+    const cur = out[v];
+    if (cur === 0) {
+      const q = grid.nearest(p, tol * 3);
+      if (!q || q.dist > tol) continue;
+      // 面の向きがそろっている点だけ（歯頸部で立ち上がる歯肉を歯にしない）
+      const j = 3 * q.index;
+      if (SN[3 * v] * allN[j] + SN[3 * v + 1] * allN[j + 1] + SN[3 * v + 2] * allN[j + 2] < 0.7) continue;
+      const f = owner[q.index];
+      if (!addBy.has(f)) addBy.set(f, []);
+      addBy.get(f).push(v);
+      continue;
+    }
+    if (per.has(cur)) {
+      const qq = per.get(cur).nearest(p, tol * 2.5);
+      if (!qq || qq.dist > tol * 2.5) { if (!remBy.has(cur)) remBy.set(cur, []); remBy.get(cur).push(v); }
+    }
+  }
+  let added = 0, removed = 0;
+  const skipped = [];
+  for (const { fdi } of ctTeeth) {
+    const n0 = before.get(fdi) || 0;
+    const ad = addBy.get(fdi) || [], rm = remBy.get(fdi) || [];
+    if (n0 > 0 && (rm.length > n0 * 0.4 || ad.length > n0 * 0.8)) { skipped.push(fdi); continue; }
+    for (const v of ad) out[v] = fdi;
+    for (const v of rm) out[v] = 0;
+    added += ad.length; removed += rm.length;
+  }
+  cleanupLabels(scan, out, 1, 30);
+  return { labels: out, added, removed, skipped };
 }

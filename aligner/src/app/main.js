@@ -9,7 +9,7 @@ import { parseDicomFile, buildVolume, volumeMatrix, sampleVolume } from '../io/d
 import { makeZip, readZip } from '../io/zip.js';
 import { rigidFromPairs, rmsError, icp, autoRegister, frontFacingCandidates, PointGrid } from '../geom/register.js';
 import { volumeThresholds, findDentalROI, cropVolume, dentalThresholds } from '../geom/volstats.js';
-import { segmentTeeth, paintLabels, fillRegion, concavity, labelCounts } from '../geom/segment.js';
+import { segmentTeeth, paintLabels, fillRegion, concavity, labelCounts, relabelFromCT } from '../geom/segment.js';
 import { extractRoot } from '../geom/rootSeg.js';
 import { volumeIsosurface, smoothVolume, removeSmallParts } from '../geom/isosurface.js';
 import { poseMatrix, matrixToPose, attachmentMesh, buccalAnchor } from '../geom/tooth.js';
@@ -24,7 +24,7 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.11（歯冠を手で塗って修正）';
+export const APP_VERSION = 'v0.12（CT の歯冠・歯根を活用）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -40,6 +40,8 @@ const S = {
   arches: { upper: null, lower: null },
   toothProps: {},
   cbctRoots: {},
+  cbctTeeth: {},
+  cbctCrowns: {},
   cbct: null,
   face: null,
   ceph: { img: null, imgURL: null, points: {}, pxPerMm: null, targets: { ...DEFAULT_TARGETS }, calib: null, lm: 0, ojTarget: 2.5, obTarget: 2.0 },
@@ -476,7 +478,10 @@ function drawArch(jaw) {
     const crown = viewer.addMesh(`teeth_${jaw}`, t.crown, { color: fdi === S.sel ? COL.crownSel : 0xffffff, colors: t.crown.fromOld ? subColors(jaw, t.crown.fromOld, IVORY) : null, userData: { fdi, jaw, vc: !!t.crown.fromOld } });
     crown.matrixAutoUpdate = false;
     const rootIdx = t.mesh.indices.subarray(t.rootFaceStart * 3);
-    const root = t.cbctRoot
+    const showFull = $('showCtTooth')?.checked && t.cbctTooth;
+    const root = showFull
+      ? viewer.addMesh(`teeth_${jaw}`, t.cbctTooth, { color: COL.cbctRoot, opacity: 0.5, userData: { fdi, jaw, root: true } })
+      : t.cbctRoot
       ? viewer.addMesh(`teeth_${jaw}`, t.cbctRoot, { color: COL.cbctRoot, opacity: 0.8, userData: { fdi, jaw, root: true } })
       : viewer.addMesh(`teeth_${jaw}`, new Mesh(t.mesh.positions, rootIdx), { color: COL.root, opacity: 0.55, userData: { fdi, jaw, root: true } });
     root.matrixAutoUpdate = false;
@@ -639,6 +644,7 @@ function lmName(t) {
 function drawLmMarkers() {
   viewer.clearMarkers();
   const tab = document.querySelector('#tabs button.on')?.dataset.step;
+  viewer.setVisible('refplanes', tab === 'register'); // 基準平面は位置合わせのタブでだけ表示
   if (tab !== 'register') return drawSeeds();
   if (S.cbct) for (const r of REF_POINTS) {
     const p = S.lm.ref[r.key];
@@ -1058,7 +1064,7 @@ $('buildTeeth').onclick = () => {
 function buildTeethFor(j) {
   const prev = { teeth: new Map(Object.entries(S.toothProps).map(([k, v]) => [+k, v])) };
   S.arches[j] = buildArch(j, S.scans[j], S.labels[j], prev);
-  for (const [fdi, t] of S.arches[j].teeth) { saveToothProps(t); if (S.cbctRoots[fdi]) t.cbctRoot = S.cbctRoots[fdi]; }
+  for (const [fdi, t] of S.arches[j].teeth) { saveToothProps(t); if (S.cbctRoots[fdi]) t.cbctRoot = S.cbctRoots[fdi]; if (S.cbctTeeth[fdi]) t.cbctTooth = S.cbctTeeth[fdi]; }
   drawArch(j);
   setVis('scan', false);
   $('segStatus').textContent = `${JAW_JA[j]}: 歯 ${S.arches[j].teeth.size} 本を作成（歯根は平均的な長さで推定。「4 歯軸・歯根」で調整）`;
@@ -1431,9 +1437,10 @@ async function autoRoots(teeth) {
     const fit = localToothFit(t);
     fits.push(fit);
     const Mt = fit.M;
-    let r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: k0 });
-    if (r.error) r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: Math.min(0.85, k0 + 0.15) }); // 骨へ漏れたらしきい値を上げて再試行
-    if (r.error) r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: Math.max(0.2, k0 - 0.15) }); // 途切れたら下げて再試行
+    const nm = { noMesh: alignAxis }; // 歯軸を合わせる場合は、合わせたあとの抽出でだけメッシュを作る
+    let r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: k0, ...nm });
+    if (r.error) r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: Math.min(0.85, k0 + 0.15), ...nm }); // 骨へ漏れたらしきい値を上げて再試行
+    if (r.error) r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: Math.max(0.2, k0 - 0.15), ...nm }); // 途切れたら下げて再試行
     if (r.error && isFinite(fit.after) && fit.after > 1.0) r.error += `（歯冠と CT の歯のずれ 平均 ${fit.after.toFixed(1)} mm。位置合わせを見直してください）`;
     if (r.error) { ng.push(`${t.fdi}: ${r.error}`); continue; }
     if (alignAxis) {
@@ -1443,11 +1450,16 @@ async function autoRoots(teeth) {
       // 合わせた歯軸でもう一度抽出（断面の向きが歯根に沿うので形がきれいになる）
       const r2 = extractRoot(S.cbct.vol, Mt, t, nb(), { k: r.k ?? k0, threshold: r.threshold });
       if (!r2.error) r = r2;
+      else { const r3 = extractRoot(S.cbct.vol, Mt, t, nb(), { k: k0 }); if (r3.error) { ng.push(`${t.fdi}: ${r2.error}`); continue; } r = r3; }
     }
     t.rootLength = +r.rootLength.toFixed(1);
     refreshTooth(arch, t);
     t.cbctRoot = r.mesh;
     S.cbctRoots[t.fdi] = r.mesh;
+    t.cbctTooth = r.toothMesh;
+    S.cbctTeeth[t.fdi] = r.toothMesh;
+    t.cbctCrown = r.crownMesh;
+    S.cbctCrowns[t.fdi] = r.crownMesh;
     saveToothProps(t);
     ok.push(`${t.fdi}（${t.rootLength} mm${r.roots > 1 && r.roots <= 3 ? `・${r.roots}根` : ''}）`);
   }
@@ -1473,9 +1485,34 @@ $('autoRootAll').onclick = () => {
   if (!list.length) return alert('先に「3 歯の分割」で歯を作成してください');
   withBusy('歯根を抽出中…', () => autoRoots(list));
 };
+$('showCtTooth').onchange = () => { for (const j of JAWS) if (S.arches[j]) drawArch(j); setVis('roots', true); };
+$('ctRelabel').onclick = () => {
+  // CT の歯冠（歯頸部のくびれより上）だけを使う：歯肉の下の部分で歯肉を歯と誤認しないように
+  const list = JAWS.flatMap((j) => (S.arches[j] ? [...S.arches[j].teeth.values()].map((t) => ({ j, fdi: t.fdi, mesh: S.cbctCrowns[t.fdi] })).filter((q) => q.mesh) : []));
+  if (!list.length) return alert('先に「全ての歯」で CT から歯を抽出してください');
+  withBusy('CT の歯冠でスキャンの歯冠を補正中…', async () => {
+    const msgs = [];
+    for (const j of JAWS) {
+      if (!S.labels[j] || !S.arches[j]) continue;
+      const teeth = list.filter((q) => q.j === j);
+      if (!teeth.length) continue;
+      busy(true, `${JAW_JA[j]}：CT の歯冠でスキャンの歯冠を補正中…`); await tick();
+      pushUndo(j);
+      const r = relabelFromCT(S.scans[j], S.labels[j], teeth, PointGrid, num('ctRelabelTol'));
+      S.labels[j] = r.labels;
+      refreshScanColors(j);
+      afterPaint(j);
+      buildTeethFor(j);
+      msgs.push(`${JAW_JA[j]}: 歯に追加 ${r.added.toLocaleString()} 点・歯肉に戻した ${r.removed.toLocaleString()} 点${r.skipped.length ? `（CT の歯冠がずれているため見送り: ${r.skipped.join(', ')}）` : ''}`);
+    }
+    $('ctRelabelStatus').textContent = msgs.join(' / ') + '。歯を作り直しました（「3 歯の分割」の「元に戻す」で取り消せます）。';
+    log(`CT で歯冠を補正: ${msgs.join(' / ')}`, 'ok');
+    if (JAWS.some((j) => S.plan[j])) log('歯冠が変わったので、自動排列をやり直してください', 'warn');
+  });
+};
 $('autoRootClear').onclick = () => {
-  for (const j of JAWS) if (S.arches[j]) for (const t of S.arches[j].teeth.values()) t.cbctRoot = null;
-  S.cbctRoots = {};
+  for (const j of JAWS) if (S.arches[j]) for (const t of S.arches[j].teeth.values()) { t.cbctRoot = null; t.cbctTooth = null; }
+  S.cbctRoots = {}; S.cbctTeeth = {}; S.cbctCrowns = {};
   for (const j of JAWS) if (S.arches[j]) drawArch(j);
   updateRootPanel();
 };
@@ -1936,6 +1973,8 @@ $('saveProject').onclick = () => {
   }
   if (S.face) files.push({ name: 'face.obj', data: S.face.text });
   for (const [fdi, m] of Object.entries(S.cbctRoots)) files.push({ name: `roots/${fdi}.stl`, data: writeSTL(m, `root_${fdi}`) });
+  for (const [fdi, m] of Object.entries(S.cbctTeeth)) files.push({ name: `ctteeth/${fdi}.stl`, data: writeSTL(m, `cttooth_${fdi}`) });
+  for (const [fdi, m] of Object.entries(S.cbctCrowns)) if (m) files.push({ name: `ctcrowns/${fdi}.stl`, data: writeSTL(m, `ctcrown_${fdi}`) });
   download(`${$('caseId').value || 'case'}.alnproj.zip`, makeZip(files), 'application/zip');
   log('プロジェクトを保存しました（CBCT 本体は含まれません。開くときに DICOM を読み直してください）');
 };
@@ -1946,7 +1985,12 @@ $('openProject').onchange = (e) => e.target.files[0] && withBusy('プロジェ�
   S.toothProps = proj.toothProps || {};
   S.missing = proj.missing || { upper: [], lower: [] };
   S.cbctRoots = {};
-  for (const [name, data] of zip) { const mm = name.match(/^roots\/(\d+)\.stl$/); if (mm) S.cbctRoots[+mm[1]] = parseSTL(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)); }
+  S.cbctTeeth = {}; S.cbctCrowns = {};
+  for (const [name, data] of zip) {
+    const mm = name.match(/^roots\/(\d+)\.stl$/); if (mm) S.cbctRoots[+mm[1]] = parseSTL(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+    const mt = name.match(/^ctteeth\/(\d+)\.stl$/); if (mt) S.cbctTeeth[+mt[1]] = parseSTL(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+    const mc = name.match(/^ctcrowns\/(\d+)\.stl$/); if (mc) S.cbctCrowns[+mc[1]] = parseSTL(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+  }
   for (const j of JAWS) {
     const ext = ['stl', 'ply', 'obj'].find((x) => zip.get(`${j}.${x}`));
     if (!ext) continue;

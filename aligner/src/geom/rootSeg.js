@@ -1,4 +1,4 @@
-// CBCT からの歯根の自動抽出
+// CBCT からの歯の自動抽出（歯根＋歯冠）
 //
 // 方針（1本ずつ）
 //  1) 歯の座標系（m=近心, b=頬側, z=歯軸）に沿った局所グリッドへ CBCT を再サンプリング
@@ -123,6 +123,21 @@ export function extractRoot(vol, M, t, neighbors = [], opts = {}) {
 
   // ---- 再サンプリングと隣接歯の分離 ----
   const nb = neighbors.filter((n) => Math.hypot(...sub(n.cervical, cerv)) < 16);
+  /** 高さ w の断面を再サンプリング（隣の歯側はボロノイ分割で除外） */
+  const sampleSlice = (w) => {
+    const Is = new Float32Array(nSl), As = new Uint8Array(nSl);
+    for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
+      const u = u0 + i * h, v = v0 + j * h;
+      if (u * u + v * v > R * R) continue;
+      const p = toW(u, v, w);
+      const dOwn = Math.hypot(u, v);
+      let ok = true;
+      for (const n of nb) if (lineDist(p, n.cervical, n.z) < dOwn) { ok = false; break; }
+      if (!ok) continue;
+      As[i + nu * j] = 1; Is[i + nu * j] = S(p);
+    }
+    return { Is, As };
+  };
   const I = new Float32Array(nSl * nw);
   const allowed = new Uint8Array(nSl * nw);
   for (let k = 0; k < nw; k++) {
@@ -183,20 +198,68 @@ export function extractRoot(vol, M, t, neighbors = [], opts = {}) {
   // 複根の数：3 断面以上続いた最大の成分数
   for (let q = 0; q + 2 < rootsAt.length; q++) maxRoots = Math.max(maxRoots, Math.min(rootsAt[q], rootsAt[q + 1], rootsAt[q + 2]));
 
-  // ---- メッシュ化（1ボクセルぼかして 0.5 の等値面） ----
-  const pad = 2;
-  const gu = nu + 2 * pad, gv = nv + 2 * pad, gw = last + 1 + 2 * pad;
-  const F = new Float32Array(gu * gv * gw).fill(0.5);
-  const at = (i, j, k) => (i < 0 || j < 0 || k < 0 || i >= nu || j >= nv || k > last ? 0 : mask[i + nu * j + nSl * k]);
-  for (let k = 0; k < gw; k++) for (let j = 0; j < gv; j++) for (let i = 0; i < gu; i++) {
-    const ii = i - pad, jj = j - pad, kk = k - pad;
-    let s = 0;
-    for (let dk = -1; dk <= 1; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) s += at(ii + di, jj + dj, kk + dk);
-    F[i + gu * (j + gv * k)] = 0.5 - s / 27 + 1e-4;
+  // ---- 歯冠方向へもたどる（CT の歯冠） ----
+  const crownTop = Math.max(t.crownHeight || 0, 6) + 1.0;
+  const upMasks = [];
+  {
+    let pu = mask.slice(0, nSl);
+    const area0 = area(pu);
+    for (let w = hStart + h; w <= crownTop; w += h) {
+      const { Is, As } = sampleSlice(w);
+      const grow = dilate2(pu, nu, nv);
+      const cur = new Uint8Array(nSl);
+      for (let q = 0; q < nSl; q++) cur[q] = grow[q] && As[q] && Is[q] > T ? 1 : 0;
+      keepTouching(cur, pu, nu, nv);
+      fillHoles2(cur, nu, nv);
+      const a2 = area(cur);
+      if (a2 < 3 || a2 > area0 * 4 + 20) break; // 途切れた／対合歯や隣へ漏れた
+      upMasks.push(cur); pu = cur;
+    }
   }
-  let mesh = marchingTets(F, [gu, gv, gw], (i, j, k) => toW(u0 + (i - pad) * h, v0 + (j - pad) * h, hStart - (k - pad) * h));
-  taubinSmooth(mesh, 6);
-  mesh = decimate(mesh, { maxError: 0.02, targetRatio: 0.05 });
+
+  // ---- メッシュ化（1ボクセルぼかして 0.5 の等値面） ----
+  // slices: 上から順の断面マスク、wTop: 先頭の高さ
+  const meshFrom = (slices, wTop, dec = true) => {
+    const pad = 2, n = slices.length;
+    const gu = nu + 2 * pad, gv = nv + 2 * pad, gw = n + 2 * pad;
+    const F = new Float32Array(gu * gv * gw).fill(0.5);
+    const at = (i, j, k) => (i < 0 || j < 0 || k < 0 || i >= nu || j >= nv || k >= n ? 0 : slices[k][i + nu * j]);
+    for (let k = 0; k < gw; k++) for (let j = 0; j < gv; j++) for (let i = 0; i < gu; i++) {
+      const ii = i - pad, jj = j - pad, kk = k - pad;
+      let s0 = 0;
+      for (let dk = -1; dk <= 1; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) s0 += at(ii + di, jj + dj, kk + dk);
+      F[i + gu * (j + gv * k)] = 0.5 - s0 / 27 + 1e-4;
+    }
+    let ms = marchingTets(F, [gu, gv, gw], (i, j, k) => toW(u0 + (i - pad) * h, v0 + (j - pad) * h, wTop - (k - pad) * h));
+    taubinSmooth(ms, 6);
+    return dec ? decimate(ms, { maxError: 0.02, targetRatio: 0.05 }) : ms;
+  };
+  if (opts.noMesh) {
+    // 歯軸・歯根長だけ欲しいとき（後で向きを合わせて抽出し直す場合）はメッシュを作らない
+    const pts0 = centroids.map((c) => c.p);
+    const pc0 = pca(pts0);
+    let d0 = pc0.axes[0]; if (d0[2] < 0) d0 = scale(d0, -1);
+    const ax0 = norm(add(add(scale(m, d0[0]), scale(b, d0[1])), scale(z, d0[2])));
+    const rl0 = -(hStart - last * h), ex0 = t.info?.rootLength ?? 14;
+    if (rl0 > ex0 * 1.45 || rl0 < ex0 * 0.45) return { error: `歯根の長さが不自然です（${rl0.toFixed(1)} mm）`, threshold: T };
+    return { rootLength: rl0, axis: ax0, threshold: T, iTooth, iLow, tipDeg: (Math.atan2(dot(ax0, m), dot(ax0, z)) * 180) / Math.PI, torqueDeg: (Math.atan2(dot(ax0, b), dot(ax0, z)) * 180) / Math.PI };
+  }
+  const rootSlices = [];
+  for (let k = 0; k <= last; k++) rootSlices.push(mask.subarray(nSl * k, nSl * (k + 1)));
+  const mesh = meshFrom(rootSlices, hStart);
+  const allSlices = [...upMasks].reverse().concat(rootSlices);
+  const wTop = hStart + upMasks.length * h;
+  const toothMesh = meshFrom(allSlices, wTop);
+  // 歯頸部のくびれ（断面積が最小）を CT から求め、それより上を CT の歯冠とする
+  const i0 = upMasks.length; // hStart の断面の位置
+  let cej = i0, minA = Infinity;
+  for (let i = Math.max(0, i0 - Math.round(3 / h)); i <= Math.min(allSlices.length - 1, i0 + Math.round(3 / h)); i++) {
+    const a3 = area(allSlices[i]);
+    if (a3 > 3 && a3 < minA) { minA = a3; cej = i; }
+  }
+  const crownMesh = cej > 2 ? meshFrom(allSlices.slice(0, cej + 1), wTop, false) : null; // 補正に使うので間引かない
+  const cejHeight = wTop - cej * h; // 歯頸部中心からの高さ
+  const crownReach = upMasks.length * h - hStart; // 歯頸部中心から CT で追えた歯冠の高さの目安
 
   // ---- 歯軸（断面重心の主成分）と歯根長 ----
   const pts = centroids.map((c) => c.p);
@@ -210,7 +273,7 @@ export function extractRoot(vol, M, t, neighbors = [], opts = {}) {
   if (rootLength > expect * 1.45) return { error: `歯根が骨と区別できませんでした（${rootLength.toFixed(1)} mm まで伸びたため不採用）。しきい値の位置を上げて再試行してください`, iTooth, iLow, threshold: T };
   if (rootLength < expect * 0.45) return { error: `歯根を途中までしか追跡できませんでした（${rootLength.toFixed(1)} mm）。しきい値の位置を下げて再試行してください`, iTooth, iLow, threshold: T };
   return {
-    mesh, rootLength, axis, roots: maxRoots, threshold: T, iTooth, iLow,
+    mesh, toothMesh, crownMesh, cejHeight, crownReach, crownSliceCount: upMasks.length, rootLength, axis, roots: maxRoots, threshold: T, iTooth, iLow,
     tipDeg: (Math.atan2(dot(axis, m), dot(axis, z)) * 180) / Math.PI,
     torqueDeg: (Math.atan2(dot(axis, b), dot(axis, z)) * 180) / Math.PI,
   };
