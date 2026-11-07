@@ -9,7 +9,7 @@ import { makeZip, readZip } from '../io/zip.js';
 import { rigidFromPairs, rmsError, icp, autoRegister, frontFacingCandidates } from '../geom/register.js';
 import { volumeThresholds, findDentalROI, cropVolume, dentalThresholds } from '../geom/volstats.js';
 import { segmentTeeth, paintLabels } from '../geom/segment.js';
-import { volumeIsosurface } from '../geom/isosurface.js';
+import { volumeIsosurface, smoothVolume, removeSmallParts } from '../geom/isosurface.js';
 import { poseMatrix, matrixToPose, attachmentMesh, buccalAnchor } from '../geom/tooth.js';
 import { buildArch, morphGingiva, refreshTooth, shellInput } from '../plan/arch.js';
 import { archOrder, toothInfo, POSE_KEYS, POSE_LABELS, zeroPose, DEFAULT_LIMITS, positionOf } from '../plan/teeth.js';
@@ -22,7 +22,7 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.5（基準点で位置合わせ・カンペル平面）';
+export const APP_VERSION = 'v0.6（骨の表示・しきい値調整）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -45,7 +45,7 @@ const S = {
   setJaw: 'upper',
   mode: null,
   seedFdi: 17,
-  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: true, slices: false, face: true, shell: true },
+  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: true, bone: true, skin: false, cbct3d: true, slices: false, face: true, shell: true },
 };
 
 const viewer = new Viewer($('view'));
@@ -100,7 +100,7 @@ $('tabs').addEventListener('click', (e) => {
 // ------------------------------------------------------------------ ツールバー
 const TOOLBAR = [
   ['upper', '上顎'], ['lower', '下顎'], ['scan', 'スキャン'], ['gingiva', '歯肉'], ['roots', '歯根'],
-  ['iso', 'CBCT 等値面'], ['slices', 'CBCT 断面'], ['face', '顔'], ['shell', 'アライナー'],
+  ['cbct3d', 'CBCT 立体'], ['slices', 'CBCT 断面'], ['face', '顔'], ['shell', 'アライナー'],
 ];
 for (const [k, label] of TOOLBAR) {
   const b = document.createElement('button');
@@ -127,7 +127,9 @@ function applyVisibility() {
     viewer.setVisible(`shell_${j}`, show && S.vis.shell);
     for (const c of viewer.group(`teeth_${j}`).children) if (c.userData.root) c.visible = S.vis.roots;
   }
-  viewer.setVisible('iso', S.vis.iso);
+  viewer.setVisible('iso', S.vis.cbct3d && S.vis.iso);
+  viewer.setVisible('bone', S.vis.cbct3d && !!S.vis.bone);
+  viewer.setVisible('skin', S.vis.cbct3d && !!S.vis.skin);
   viewer.setVisible('slices', S.vis.slices);
   viewer.setVisible('face', S.vis.face);
 }
@@ -192,6 +194,13 @@ async function setVolume(vol, { autoAlign = false, fails = 0 } = {}) {
   if (autoAlign && (S.scans.upper || S.scans.lower)) await autoAlignScanCbct();
   if (autoAlign && S.face) await autoAlignFace();
   S.cbct.bone = null; S.cbct.skin = null;
+  $('boneThr').value = Math.round(th.bone);
+  $('skinThr').value = Math.round(th.skin);
+  S.cbct.thr.range = th.max - th.skin;
+  // 基準点を打てるよう、骨の立体を最初から表示
+  busy(true, '骨の立体を作成中…', 0.97); await tick();
+  ensureBone();
+  S.vis.bone = true; setVis('cbct3d', true);
   redrawCbctExtras();
   renderLmTables();
   if (!autoAlign) log('CBCT を読み込みました。「2 位置合わせ」で基準点を打って合わせてください', 'ok');
@@ -752,25 +761,28 @@ $('faceLmAdd').onclick = () => { S.lm.face.push({ name: `追加点 ${S.lm.face.l
 $('faceLmClear').onclick = () => { if (!confirm('顔⇄CBCT の点をすべて消しますか？')) return; S.lm.face = FACE_POINTS.map((name) => ({ name, cbct: null, face: null })); S.lm.faceErr = null; renderLmTables(); };
 
 // 点を打つための CBCT 表示（骨・皮膚の立体）
-function ensureSkin() {
-  if (S.cbct.skin) return;
-  const vol = S.cbct.vol, Mv = volumeMatrix(vol);
-  const step = vol.dims[0] * vol.dims[1] * vol.dims[2] > 8e6 ? 2 : 1;
-  S.cbct.skin = volumeIsosurface(vol, S.cbct.thr.skin, step, (i, j, k) => mApply(Mv, [i, j, k]));
+function wholeIso(thr) {
+  // 表示用：平滑化した CT から作り、ノイズの粒を除く
+  if (!S.cbct.smooth) S.cbct.smooth = smoothVolume(S.cbct.vol);
+  const vol = S.cbct.smooth, Mv = volumeMatrix(vol);
+  let step = vol.dims[0] * vol.dims[1] * vol.dims[2] > 8e6 ? 2 : 1;
+  let m = volumeIsosurface(vol, thr, step, (i, j, k) => mApply(Mv, [i, j, k]));
+  // 面が多すぎると画面が固まるので、粗くして作り直す
+  while (m.nf > 2.5e6 && step < 4) {
+    step *= 2;
+    m = volumeIsosurface(vol, thr, step, (i, j, k) => mApply(Mv, [i, j, k]));
+    log(`面が多すぎるため、間引きを ${step} にして作り直しました（しきい値が骨と軟組織の境目に近い可能性があります）`, 'warn');
+  }
+  return removeSmallParts(m, 400);
 }
-function ensureBone() {
-  if (S.cbct.bone) return;
-  const vol = S.cbct.vol, Mv = volumeMatrix(vol);
-  const step = vol.dims[0] * vol.dims[1] * vol.dims[2] > 8e6 ? 2 : 1;
-  S.cbct.bone = volumeIsosurface(vol, S.cbct.thr.bone, step, (i, j, k) => mApply(Mv, [i, j, k]));
-}
+function ensureSkin() { if (!S.cbct.skin) { S.cbct.skin = wholeIso(num('skinThr')); log(`皮膚の立体: しきい値 ${num('skinThr')}`); } }
+function ensureBone() { if (!S.cbct.bone) { S.cbct.bone = wholeIso(num('boneThr')); log(`骨の立体: しきい値 ${num('boneThr')}（${S.cbct.bone.nf.toLocaleString()} 面）`); } }
 function redrawCbctExtras() {
-  for (const [g, key, color, op] of [['bone', 'bone', 0xe9e2cf, 0.9], ['skin', 'skin', 0xf0c8b0, 0.45]]) {
+  for (const [g, key, color, op] of [['bone', 'bone', 0xeee6d2, num('boneOpacity')], ['skin', 'skin', 0xf0c8b0, num('skinOpacity')]]) {
     viewer.clearGroup(g);
     if (S.cbct?.[key]) viewer.addMesh(g, S.cbct[key], { color, opacity: op, matrix: S.cbct.M, doubleSide: true });
   }
-  viewer.setVisible('bone', !!S.vis.bone);
-  viewer.setVisible('skin', !!S.vis.skin);
+  applyVisibility();
   $('showBone').classList.toggle('on', !!S.vis.bone);
   $('showSkin').classList.toggle('on', !!S.vis.skin);
   $('toggleSlices').classList.toggle('on', !!S.vis.slices);
@@ -778,14 +790,21 @@ function redrawCbctExtras() {
 }
 $('showBone').onclick = () => {
   if (!S.cbct) return alert('先に CBCT を読み込んでください');
-  withBusy('骨の立体を作成中…', async () => { ensureBone(); S.vis.bone = !S.vis.bone; redrawCbctExtras(); });
+  withBusy('骨の立体を作成中…', async () => { ensureBone(); S.vis.bone = !S.vis.bone; setVis('cbct3d', true); redrawCbctExtras(); });
 };
 $('showSkin').onclick = () => {
   if (!S.cbct) return alert('先に CBCT を読み込んでください');
-  withBusy('皮膚の立体を作成中…', async () => { ensureSkin(); S.vis.skin = !S.vis.skin; redrawCbctExtras(); });
+  withBusy('皮膚の立体を作成中…', async () => { ensureSkin(); S.vis.skin = !S.vis.skin; setVis('cbct3d', true); redrawCbctExtras(); });
 };
 $('toggleSlices').onclick = () => { setVis('slices', !S.vis.slices); redrawCbctExtras(); };
-$('showTeethIso').onclick = () => { setVis('iso', !S.vis.iso); redrawCbctExtras(); };
+$('showTeethIso').onclick = () => { setVis('iso', !S.vis.iso); setVis('cbct3d', true); redrawCbctExtras(); };
+// しきい値を変えて作り直す
+$('boneRebuild').onclick = () => { if (!S.cbct) return; withBusy('骨の立体を作り直し中…', async () => { S.cbct.bone = null; ensureBone(); S.vis.bone = true; setVis('cbct3d', true); redrawCbctExtras(); }); };
+$('skinRebuild').onclick = () => { if (!S.cbct) return; withBusy('皮膚の立体を作り直し中…', async () => { S.cbct.skin = null; ensureSkin(); S.vis.skin = true; setVis('cbct3d', true); redrawCbctExtras(); }); };
+for (const [id, step] of [['boneThr', 1], ['skinThr', 1]]) {
+  for (const [sfx, f] of [['Minus', -1], ['Plus', 1]]) $(id + sfx).onclick = () => { $(id).value = Math.round(num(id) + f * Math.max(10, Math.abs(S.cbct?.thr?.range || 1000) * 0.03)); $(id === 'boneThr' ? 'boneRebuild' : 'skinRebuild').click(); };
+}
+$('boneOpacity').oninput = $('skinOpacity').oninput = () => { for (const [g, id] of [['bone', 'boneOpacity'], ['skin', 'skinOpacity']]) for (const c of viewer.group(g).children) { c.material.opacity = num(id); c.material.transparent = num(id) < 1; c.material.depthWrite = num(id) >= 1; c.material.needsUpdate = true; } };
 
 // ------------------------------------------------------------------ 歯の分割
 function buildFdiGrid() {

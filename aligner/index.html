@@ -117,7 +117,7 @@
       <label class="btn file">DICOM フォルダを選ぶ<input type="file" id="fileDicomDir" webkitdirectory multiple></label>
       <label class="btn file">DICOM ファイルを選ぶ（複数可）<input type="file" id="fileDicom" multiple></label>
       <div class="status" id="statusCT">未読込</div>
-      <p class="note">非圧縮の DICOM に対応。大きいボリュームは自動で間引きます。読み込むと歯の周囲を立体表示します。位置合わせは「2 位置合わせ」で基準点を打って行います。</p>
+      <p class="note">非圧縮の DICOM に対応。大きいボリュームは自動で間引きます。読み込むと骨と歯を立体表示します。位置合わせは「2 位置合わせ」で基準点を打って行います（骨の見え方の調整もそこでできます）。</p>
       <h2>フェイススキャン（OBJ）</h2>
       <label class="btn file">OBJ を選ぶ<input type="file" id="fileFace" accept=".obj"></label>
       <label class="btn file">テクスチャ画像（任意・先に選んでも可）<input type="file" id="fileFaceTex" accept="image/*"></label>
@@ -132,6 +132,11 @@
       <p class="note">基準点を打って合わせます。表の「CBCT」「スキャン」「顔」の欄を押すと、その点を打つ状態になります。ビュー上をクリックすると点が記録され、次の欄へ自動で進みます。点は CBCT の立体・断面のどちらにも打てます。</p>
       <h2>CBCT の表示（点を打ちやすくする）</h2>
       <div class="row"><button id="showBone">骨</button><button id="showSkin">皮膚</button><button id="toggleSlices">断面</button><button id="showTeethIso">歯</button></div>
+      <div class="row"><label>骨のしきい値</label><button id="boneThrMinus">−</button><input type="number" id="boneThr" value="400" step="50"><button id="boneThrPlus">＋</button><button id="boneRebuild">作り直す</button></div>
+      <div class="row"><label>骨の透明度</label><input type="range" id="boneOpacity" min="0.1" max="1" step="0.05" value="0.85"></div>
+      <div class="row"><label>皮膚のしきい値</label><button id="skinThrMinus">−</button><input type="number" id="skinThr" value="-400" step="50"><button id="skinThrPlus">＋</button><button id="skinRebuild">作り直す</button></div>
+      <div class="row"><label>皮膚の透明度</label><input type="range" id="skinOpacity" min="0.1" max="1" step="0.05" value="0.45"></div>
+      <p class="note">骨が薄い・穴だらけなら「−」でしきい値を下げる、軟組織まで出てしまうなら「＋」で上げてください。</p>
       <div class="row"><label>軸位</label><input type="range" id="sliceZ" min="0" max="1" step="0.001" value="0.5"></div>
       <div class="row"><label>冠状</label><input type="range" id="sliceY" min="0" max="1" step="0.001" value="0.5"></div>
       <div class="row"><label>矢状</label><input type="range" id="sliceX" min="0" max="1" step="0.001" value="0.5"></div>

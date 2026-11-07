@@ -1,7 +1,7 @@
 // 等値面抽出：マーチングテトラヘドラ（Kuhn 6分割）。表が小さく、隣接セル間で必ず整合するため
 // 出力は閉じた多様体（グリッド境界で値が正なら水密）になる。
 // f[i + nx*(j + ny*k)] < 0 が「内側」
-import { Mesh } from '../core/mesh.js';
+import { Mesh, faceComponents } from '../core/mesh.js';
 
 // Kuhn 分割：軸の並べ替え 6 通り
 const PERMS = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
@@ -109,4 +109,38 @@ export function volumeIsosurface(vol, threshold, step = 2, toWorldIndex) {
     f[i + mx * (j + my * k)] = threshold - v + 0.01;
   }
   return marchingTets(f, [mx, my, mz], (i, j, k) => toWorldIndex((i - 1) * step, (j - 1) * step, (k - 1) * step));
+}
+
+/** ノイズを抑えるための軽い平滑化（3×3×3 の箱型フィルタ、軸ごとに分けて計算） */
+export function smoothVolume(vol) {
+  const [nx, ny, nz] = vol.dims;
+  let a = Float32Array.from(vol.data);
+  const b = new Float32Array(a.length);
+  const pass = (src, dst, stride, n, count) => {
+    for (let base = 0; base < src.length; base++) {
+      const i = Math.floor(base / stride) % n;
+      const l = i > 0 ? src[base - stride] : src[base];
+      const r = i < n - 1 ? src[base + stride] : src[base];
+      dst[base] = (l + src[base] + r) / 3;
+    }
+    void count;
+  };
+  pass(a, b, 1, nx); pass(b, a, nx, ny); pass(a, b, nx * ny, nz);
+  const data = new Int16Array(b.length);
+  for (let i = 0; i < b.length; i++) data[i] = Math.max(-32768, Math.min(32767, Math.round(b[i])));
+  return { ...vol, data };
+}
+
+/** 面数の少ない連結成分（ノイズの粒）を取り除く */
+export function removeSmallParts(mesh, minFaces = 300) {
+  const { comp, count } = faceComponents(mesh);
+  if (count <= 1) return mesh;
+  const sizes = new Uint32Array(count);
+  for (let f = 0; f < comp.length; f++) sizes[comp[f]]++;
+  const keep = new Uint8Array(mesh.nf);
+  let kept = 0;
+  for (let f = 0; f < comp.length; f++) if (sizes[comp[f]] >= minFaces) { keep[f] = 1; kept++; }
+  if (kept === mesh.nf || kept === 0) return mesh;
+  const s = mesh.submesh(keep);
+  return new Mesh(s.positions, s.indices);
 }
