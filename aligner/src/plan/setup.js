@@ -256,6 +256,12 @@ export function autoSetup(arch, options = {}) {
   return { targets, report, curve };
 }
 
+/** 設定から目標の歯列弓だけを計算（基準線のプレビュー用） */
+export function previewArchCurve(arch, options = {}) {
+  const opt = { ...DEFAULT_SETUP, ...options };
+  return targetCurve(arch, opt, opt.anteriorAdvance || 0);
+}
+
 /** 1本の歯の目標姿勢 */
 function placeTooth(arch, t, curve, xTarget, opt) {
   const F = arch.frame;

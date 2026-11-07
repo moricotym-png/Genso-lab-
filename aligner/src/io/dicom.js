@@ -189,7 +189,7 @@ export function parseDicomFile(buffer) {
  * 複数ファイル → ボリューム。maxVoxels を超える場合は2倍ずつ間引き平均する。
  * 戻り値 { dims, data(Int16Array), spacing, origin, axes:[row,col,slice], info }
  */
-export function buildVolume(slicesIn, maxVoxels = 48e6) {
+export function buildVolume(slicesIn, maxVoxels = 48e6, crop = null) {
   // 最多シリーズを選ぶ
   const bySeries = new Map();
   for (const s of slicesIn) {
@@ -224,27 +224,43 @@ export function buildVolume(slicesIn, maxVoxels = 48e6) {
   }
   let nx = ref.cols, ny = ref.rows, nz = frames.length;
   let sx = ref.pixelSpacing[1], sy = ref.pixelSpacing[0], sz = dz;
+  // 値が 16bit 符号付きに収まらない CT（0〜65535 など）は、全体を一定の比率で縮めて保存する
+  let vmin = Infinity, vmax = -Infinity;
+  for (let k = 0; k < nz; k += Math.max(1, Math.floor(nz / 40))) {
+    const fr = frames[k].data;
+    for (let i = 0; i < fr.length; i += 7) { if (fr[i] < vmin) vmin = fr[i]; if (fr[i] > vmax) vmax = fr[i]; }
+  }
+  const vScale = vmax > 32000 || vmin < -32000 ? 64000 / Math.max(1, vmax - vmin) : 1;
+  const vOff = vScale === 1 ? 0 : -32000 - vmin * vScale;
+  const store = (v) => Math.max(-32768, Math.min(32767, Math.round(v * vScale + vOff)));
   let f = 1;
-  while ((nx / f) * (ny / f) * (nz / f) > maxVoxels) f *= 2;
-  const ox = Math.floor(nx / f), oy = Math.floor(ny / f), oz = Math.floor(nz / f);
+  let i0 = 0, j0 = 0, k0 = 0, ox, oy, oz;
+  if (crop) {
+    // 指定範囲を間引かずに切り出す（歯の周囲を高解像度で使う）
+    i0 = Math.max(0, crop.i0); j0 = Math.max(0, crop.j0); k0 = Math.max(0, crop.k0);
+    ox = Math.min(nx - 1, crop.i1) - i0 + 1; oy = Math.min(ny - 1, crop.j1) - j0 + 1; oz = Math.min(nz - 1, crop.k1) - k0 + 1;
+  } else {
+    while ((nx / f) * (ny / f) * (nz / f) > maxVoxels) f *= 2;
+    ox = Math.floor(nx / f); oy = Math.floor(ny / f); oz = Math.floor(nz / f);
+  }
   const data = new Int16Array(ox * oy * oz);
   for (let k = 0; k < oz; k++) {
     for (let j = 0; j < oy; j++) {
       for (let i = 0; i < ox; i++) {
         let s = 0;
         for (let kk = 0; kk < f; kk++) {
-          const fr = frames[k * f + kk].data;
+          const fr = frames[k0 + k * f + kk].data;
           for (let jj = 0; jj < f; jj++) {
-            const rowOff = (j * f + jj) * nx;
-            for (let ii = 0; ii < f; ii++) s += fr[rowOff + i * f + ii];
+            const rowOff = (j0 + j * f + jj) * nx;
+            for (let ii = 0; ii < f; ii++) s += fr[rowOff + i0 + i * f + ii];
           }
         }
-        const v = s / (f * f * f);
-        data[(k * oy + j) * ox + i] = Math.max(-32768, Math.min(32767, Math.round(v)));
+        data[(k * oy + j) * ox + i] = store(s / (f * f * f));
       }
     }
   }
   const origin = frames[0].pos.slice();
+  for (let a = 0; a < 3; a++) origin[a] += row[a] * sx * i0 + col[a] * sy * j0 + nrm[a] * sz * k0;
   // 間引き時はボクセル中心をずらす
   if (f > 1) {
     const h = (f - 1) / 2;
@@ -256,7 +272,7 @@ export function buildVolume(slicesIn, maxVoxels = 48e6) {
     spacing: [sx * f, sy * f, sz * f],
     origin,
     axes: [row, col, nrm],
-    info: { modality: ref.modality, patientName: ref.patientName, downsample: f, slices: frames.length },
+    info: { modality: ref.modality, patientName: ref.patientName, downsample: f, slices: frames.length, fullDims: [nx, ny, nz], valueScale: vScale, valueOffset: vOff },
   };
 }
 

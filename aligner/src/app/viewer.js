@@ -164,6 +164,19 @@ export class Viewer {
     this.root.matrixWorldNeedsUpdate = true;
   }
 
+  /** 折れ線（points: [[x,y,z],...]）。手前に描く */
+  addLine(groupName, points, color = 0xff0000, { dashed = false, width = 1, onTop = true } = {}) {
+    const g = new THREE.BufferGeometry().setFromPoints(points.map((p) => new THREE.Vector3(p[0], p[1], p[2])));
+    const mat = dashed
+      ? new THREE.LineDashedMaterial({ color, dashSize: 1.5, gapSize: 1, depthTest: !onTop, transparent: true, opacity: 0.95 })
+      : new THREE.LineBasicMaterial({ color, depthTest: !onTop, transparent: true, opacity: width > 1 ? 1 : 0.85 });
+    const line = new THREE.Line(g, mat);
+    if (dashed) line.computeLineDistances();
+    line.renderOrder = 9;
+    this.group(groupName).add(line);
+    return line;
+  }
+
   /** 番号などの文字ラベル（常に手前に表示） */
   addLabel(p, text, color = '#ffffff', bg = 'rgba(0,0,0,0.65)') {
     const cv = document.createElement('canvas');

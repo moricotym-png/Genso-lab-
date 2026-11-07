@@ -2,7 +2,7 @@
 import { Viewer, LABEL_COLORS, makeSliceMesh, meshToGeometry, makeVolumeMesh, THREE } from './viewer.js';
 import { Mesh, mergeMeshes, weldIndexed } from '../core/mesh.js';
 import { parsePLY } from '../io/ply.js';
-import { mApply, mMul, mInvRigid, mTranslate, mIdentity, sub, add, scale, dot, norm, cross } from '../core/vec.js';
+import { mApply, mApplyDir, mMul, mInvRigid, mTranslate, mIdentity, sub, add, scale, dot, norm, cross } from '../core/vec.js';
 import { parseSTL, writeSTL } from '../io/stl.js';
 import { parseOBJ } from '../io/obj.js';
 import { parseDicomFile, buildVolume, volumeMatrix, sampleVolume } from '../io/dicom.js';
@@ -16,7 +16,7 @@ import { poseMatrix, matrixToPose, attachmentMesh, buccalAnchor } from '../geom/
 import { buildArch, morphGingiva, refreshTooth, shellInput } from '../plan/arch.js';
 import { archOrder, toothInfo, POSE_KEYS, POSE_LABELS, zeroPose, DEFAULT_LIMITS, positionOf } from '../plan/teeth.js';
 import { CEPH_LANDMARKS, CEPH_MEASURES, DEFAULT_TARGETS, measureCeph, cephToToothGoals } from '../plan/ceph.js';
-import { autoSetup, DEFAULT_SETUP, overjetOverbite } from '../plan/setup.js';
+import { autoSetup, DEFAULT_SETUP, overjetOverbite, previewArchCurve } from '../plan/setup.js';
 import { autoStage, poseAt, posesAt, setKey, checkVelocities, stagingTable, contactReport, STRATEGIES, stagesNeeded } from '../plan/staging.js';
 import { makeDemoJaw, makeDemoCBCT, DEMO_CEPH_POINTS } from '../demo/demoCase.js';
 
@@ -24,7 +24,7 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.12（CT の歯冠・歯根を活用）';
+export const APP_VERSION = 'v0.13（歯根抽出の改良・基準線）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -54,7 +54,7 @@ const S = {
   setJaw: 'upper',
   mode: null,
   seedFdi: 17,
-  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: false, bone: false, skin: false, vr: true, cbct3d: true, slices: false, face: true, shell: true },
+  vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: false, bone: false, skin: false, vr: true, cbct3d: true, slices: false, face: true, shell: true, guides: true },
 };
 
 const viewer = new Viewer($('view'));
@@ -109,7 +109,7 @@ $('tabs').addEventListener('click', (e) => {
 // ------------------------------------------------------------------ ツールバー
 const TOOLBAR = [
   ['upper', '上顎'], ['lower', '下顎'], ['scan', 'スキャン'], ['gingiva', '歯肉'], ['roots', '歯根'],
-  ['cbct3d', 'CBCT 立体'], ['slices', 'CBCT 断面'], ['face', '顔'], ['shell', 'アライナー'],
+  ['cbct3d', 'CBCT 立体'], ['slices', 'CBCT 断面'], ['face', '顔'], ['shell', 'アライナー'], ['guides', '基準線'],
 ];
 for (const [k, label] of TOOLBAR) {
   const b = document.createElement('button');
@@ -140,6 +140,7 @@ function applyVisibility() {
   viewer.setVisible('bone', S.vis.cbct3d && !!S.vis.bone);
   viewer.setVisible('skin', S.vis.cbct3d && !!S.vis.skin);
   viewer.setVisible('vr', S.vis.cbct3d && !!S.vis.vr);
+  viewer.setVisible('guides', !!S.vis.guides);
   viewer.setVisible('slices', S.vis.slices);
   viewer.setVisible('face', S.vis.face);
 }
@@ -181,7 +182,18 @@ async function loadDicomFiles(files, { autoAlign = false } = {}) {
   }
   if (!slices.length) throw firstErr || new Error('画像を含む DICOM が見つかりません');
   busy(true, 'ボリューム構築中…', 0.9); await tick();
-  await setVolume(buildVolume(slices), { autoAlign, fails });
+  const vol = buildVolume(slices);
+  // 間引いた場合は、歯の周囲だけ元の解像度で切り出しておく（歯根の抽出に使う）
+  let hi = null;
+  if (vol.info.downsample > 1) {
+    busy(true, '歯の周囲を高解像度で準備中…', 0.92); await tick();
+    const roi = findDentalROI(vol, { halfMM: [45, 45, 40] });
+    const f = vol.info.downsample;
+    hi = buildVolume(slices, Infinity, { i0: roi.i0 * f, i1: roi.i1 * f + f - 1, j0: roi.j0 * f, j1: roi.j1 * f + f - 1, k0: roi.k0 * f, k1: roi.k1 * f + f - 1 });
+    log(`歯の周囲を元の解像度（${hi.spacing.map((x) => x.toFixed(2)).join('×')} mm）で保持しました`);
+  }
+  await setVolume(vol, { autoAlign, fails });
+  if (hi) S.cbct.hi = hi;
 }
 async function setVolume(vol, { autoAlign = false, fails = 0 } = {}) {
   const Mv = volumeMatrix(vol);
@@ -527,8 +539,55 @@ function updatePoses() {
   $('stageLabel').textContent = `${S.stage} / ${N}${S.stage === 0 ? '（初期）' : S.stage === N ? '（最終）' : ''}`;
   updatePosePanel();
   syncGizmo();
+  drawGuides();
 }
 const maxStage = () => Math.max(0, ...JAWS.map((j) => S.plan[j]?.N || 0));
+
+// ---- 基準線（正中線・目標の歯列弓・歯軸） ----
+function drawGuides() {
+  viewer.clearGroup('guides');
+  if (!S.vis.guides) return;
+  const rf = typeof refFrame === 'function' ? refFrame() : null;
+  for (const jaw of JAWS) {
+    const arch = S.arches[jaw];
+    if (!arch || !S.vis[jaw]) continue;
+    const F = arch.frame;
+    const L = (x, y, z = 0) => fromArchLocalMain(F, [x, y, z]);
+    // 歯列の正中線（赤の破線）
+    viewer.addLine('guides', [L(0, -45), L(0, 14)], 0xef4444, { dashed: true });
+    // 患者の正中矢状面（基準平面を設定している場合、紫の線）
+    if (rf) {
+      const o = F.origin;
+      const toPlane = (p) => sub(p, scale(rf.x, dot(sub(p, rf.A), rf.x)));
+      viewer.addLine('guides', [toPlane(L(0, -45)), toPlane(L(0, 14))], 0xa855f7);
+      void o;
+    }
+    // 目標の歯列弓（黄）：セットアップ済みならその弓、未実行なら今の設定でのプレビュー
+    const rep = S.setupReport[jaw];
+    const c = rep?.curve ? new ArchCurveMain(rep.curve.c0, rep.curve.c2, rep.curve.c4) : previewArchCurve(arch, S.setupOpt[jaw]);
+    const pts = [];
+    for (let i = -60; i <= 60; i++) { const x = (i / 60) * 34; const y = c.y(x); if (y > -50) pts.push(L(x, y)); }
+    viewer.addLine('guides', pts, 0xfacc15, { width: 2 });
+    // 現在の歯列弓（灰の破線）
+    const cur = [];
+    for (let i = -60; i <= 60; i++) { const x = (i / 60) * 34; const y = F.curve.y(x); if (y > -50) cur.push(L(x, y)); }
+    viewer.addLine('guides', cur, 0x94a3b8, { dashed: true });
+    // 歯軸（青）・近遠心軸（緑）・頬舌軸（橙）を現在のステージの姿勢で
+    const poses = currentPoses(jaw);
+    for (const [fdi, t] of arch.teeth) {
+      const M = poseMatrix(t, poses.get(fdi) || zeroPose());
+      const P = (p) => mApply(M, p);
+      const sel = fdi === S.sel;
+      const top = add(t.occlusalPoint, scale(t.frame.z, 2));
+      viewer.addLine('guides', [P(t.apex), P(top)], sel ? 0x2563eb : 0x60a5fa, { width: sel ? 2 : 1 });
+      const len = sel ? 5 : 3;
+      viewer.addLine('guides', [P(sub(t.cr, scale(t.frame.m, len))), P(add(t.cr, scale(t.frame.m, len)))], 0x22c55e);
+      viewer.addLine('guides', [P(sub(t.cr, scale(t.frame.b, len))), P(add(t.cr, scale(t.frame.b, len)))], 0xf97316);
+    }
+  }
+}
+const fromArchLocalMain = (F, l) => add(add(add(F.origin, scale(F.ex, l[0])), scale(F.ey, l[1])), scale(F.ez, l[2]));
+class ArchCurveMain { constructor(c0, c2, c4) { this.c0 = c0; this.c2 = c2; this.c4 = c4; } y(x) { return this.c0 + this.c2 * x * x + this.c4 * x ** 4; } }
 
 function drawSlices() {
   viewer.clearGroup('slices');
@@ -1391,37 +1450,65 @@ $('rootApply').onclick = () => {
 };
 // ---- CBCT からの歯根の自動抽出 ----
 /**
- * 歯1本ごとに、スキャンの歯冠を CT の歯の面に合わせ直す（全体の位置合わせの小さなずれを吸収）
- * 戻り値: { M: この歯用の CBCT→スキャン行列, before, after: 歯冠と CT の歯の平均距離 mm, used: 補正を使ったか }
+ * 歯1本ごとに、スキャンの歯冠を CT の歯に合わせ直す（全体の位置合わせの小さなずれを吸収）
+ * CT の明るさを直接使う：歯冠表面のすぐ内側は明るく（エナメル質）、すぐ外側は暗い（空気・軟組織）はずなので、
+ * その差（コントラスト）が最大になる位置・向きを、6 方向の小さな移動・回転を試して探す
+ * 戻り値: { M: この歯用の CBCT→スキャン行列, shift: 補正した距離 mm, used }
  */
+function ctVol() { return S.cbct.hi || S.cbct.vol; }
 function localToothFit(t) {
-  if (!S.cbct.iso) return { M: S.cbct.M, before: NaN, after: NaN, used: false };
-  if (!S.cbct.isoGrid || S.cbct.isoGridSrc !== S.cbct.iso) { S.cbct.isoGrid = new PointGrid(S.cbct.iso.positions, 1.0); S.cbct.isoGridSrc = S.cbct.iso; }
-  const grid = S.cbct.isoGrid;
+  const vol = ctVol();
   const inv = mInvRigid(S.cbct.M);
-  const P = t.crown.positions, step = Math.max(1, Math.floor(P.length / 3 / 1500));
-  const src = [];
-  for (let i = 0; i < P.length / 3; i += step) src.push(mApply(inv, [P[3 * i], P[3 * i + 1], P[3 * i + 2]]));
-  const misfit = (D, md = 3) => { let s0 = 0, n = 0; for (const p of src) { const q = grid.nearest(mApply(D, p), md); s0 += q ? Math.min(q.dist, md) : md; n++; } return s0 / n; };
-  let D = mIdentity();
-  const before = misfit(D);
-  for (const md of [3, 3, 2, 1.5, 1, 1, 0.7, 0.7, 0.5, 0.5]) {
-    const A = [], B = [];
-    for (const p of src) {
-      const q = grid.nearest(mApply(D, p), md);
-      if (!q || q.dist > md) continue;
-      A.push(p); B.push([grid.points[3 * q.index], grid.points[3 * q.index + 1], grid.points[3 * q.index + 2]]);
-    }
-    if (A.length < 30) break;
-    D = rigidFromPairs(A, B);
+  const P = t.crown.positions, N = t.crown.vertexNormals();
+  const step = Math.max(1, Math.floor(P.length / 3 / 700));
+  const pts = [], nrs = [];
+  let c = [0, 0, 0];
+  for (let i = 0; i < P.length / 3; i += step) {
+    const p = mApply(inv, [P[3 * i], P[3 * i + 1], P[3 * i + 2]]);
+    const q = mApply(inv, [P[3 * i] + N[3 * i], P[3 * i + 1] + N[3 * i + 1], P[3 * i + 2] + N[3 * i + 2]]);
+    pts.push(p); nrs.push(sub(q, p)); c = add(c, p);
   }
-  const after = misfit(D);
-  // 補正が大きすぎる（4mm / 10° 超）か、かえって悪くなるなら使わない
-  const c = mApply(D, src[0]), tr = Math.hypot(...sub(c, src[0]));
-  const ang = Math.acos(Math.max(-1, Math.min(1, (D[0] + D[5] + D[10] - 1) / 2))) * 180 / Math.PI;
-  if (tr > 4 || ang > 10 || !(after < before)) return { M: S.cbct.M, before, after: before, used: false };
-  return { M: mMul(S.cbct.M, mInvRigid(D)), before, after, used: true };
+  c = scale(c, 1 / pts.length);
+  // CT 座標でのわずかな剛体移動 D（c を中心に回転）
+  const Dof = (x) => {
+    const R = r3FromEuler(x[3], x[4], x[5]);
+    const rc = [R[0] * c[0] + R[1] * c[1] + R[2] * c[2], R[3] * c[0] + R[4] * c[1] + R[5] * c[2], R[6] * c[0] + R[7] * c[1] + R[8] * c[2]];
+    return [R[0], R[3], R[6], 0, R[1], R[4], R[7], 0, R[2], R[5], R[8], 0, c[0] - rc[0] + x[0], c[1] - rc[1] + x[1], c[2] - rc[2] + x[2], 1];
+  };
+  const score = (x) => {
+    const D = Dof(x);
+    let s0 = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const p = mApply(D, pts[i]), n = mApplyDir(D, nrs[i]);
+      s0 += sampleVolume(vol, sub(p, scale(n, 0.4))) - sampleVolume(vol, add(p, scale(n, 0.4)));
+    }
+    return s0 / pts.length;
+  };
+  let x = [0, 0, 0, 0, 0, 0];
+  let best = score(x);
+  const base = best;
+  for (const [st, ang] of [[0.6, 2], [0.3, 1], [0.15, 0.5], [0.07, 0.25]]) {
+    let improved = true, guard = 0;
+    while (improved && guard++ < 20) {
+      improved = false;
+      for (let d = 0; d < 6; d++) for (const sg of [1, -1]) {
+        const y = x.slice();
+        y[d] += sg * (d < 3 ? st : (ang * Math.PI) / 180);
+        const sc = score(y);
+        if (sc > best + 1e-6) { best = sc; x = y; improved = true; }
+      }
+    }
+  }
+  const shift = Math.hypot(x[0], x[1], x[2]);
+  const rot = (Math.hypot(x[3], x[4], x[5]) * 180) / Math.PI;
+  if (shift > 3.5 || rot > 10 || !(best > base)) return { M: S.cbct.M, shift: 0, used: false, contrast: base };
+  return { M: mMul(S.cbct.M, mInvRigid(Dof(x))), shift, rot, used: true, contrast: best };
 }
+const r3FromEuler = (a, b, g) => {
+  const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cg = Math.cos(g), sg = Math.sin(g);
+  // Rz(g) * Ry(b) * Rx(a)
+  return [cg * cb, cg * sb * sa - sg * ca, cg * sb * ca + sg * sa, sg * cb, sg * sb * sa + cg * ca, sg * sb * ca - cg * sa, -sb, cb * sa, cb * ca];
+};
 async function autoRoots(teeth) {
   if (!S.cbct) return alert('先に CBCT を読み込み、「2 位置合わせ」でスキャンと合わせてください');
   const alignAxis = $('autoRootAxis').checked;
@@ -1438,19 +1525,19 @@ async function autoRoots(teeth) {
     fits.push(fit);
     const Mt = fit.M;
     const nm = { noMesh: alignAxis }; // 歯軸を合わせる場合は、合わせたあとの抽出でだけメッシュを作る
-    let r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: k0, ...nm });
-    if (r.error) r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: Math.min(0.85, k0 + 0.15), ...nm }); // 骨へ漏れたらしきい値を上げて再試行
-    if (r.error) r = extractRoot(S.cbct.vol, Mt, t, nb(), { k: Math.max(0.2, k0 - 0.15), ...nm }); // 途切れたら下げて再試行
-    if (r.error && isFinite(fit.after) && fit.after > 1.0) r.error += `（歯冠と CT の歯のずれ 平均 ${fit.after.toFixed(1)} mm。位置合わせを見直してください）`;
+    let r = extractRoot(ctVol(), Mt, t, nb(), { k: k0, ...nm });
+    if (r.error) r = extractRoot(ctVol(), Mt, t, nb(), { k: Math.min(0.85, k0 + 0.15), ...nm }); // 骨へ漏れたらしきい値を上げて再試行
+    if (r.error) r = extractRoot(ctVol(), Mt, t, nb(), { k: Math.max(0.2, k0 - 0.15), ...nm }); // 途切れたら下げて再試行
+    if (r.error && fit.shift > 1.5) r.error += `（この歯は ${fit.shift.toFixed(1)} mm 合わせ直しました。全体の位置合わせも見直してください）`;
     if (r.error) { ng.push(`${t.fdi}: ${r.error}`); continue; }
     if (alignAxis) {
       t.axisAdjust = { tip: +(t.axisAdjust.tip + r.tipDeg).toFixed(1), torque: +(t.axisAdjust.torque + r.torqueDeg).toFixed(1) };
       t.rootLength = +r.rootLength.toFixed(1);
       refreshTooth(arch, t);
       // 合わせた歯軸でもう一度抽出（断面の向きが歯根に沿うので形がきれいになる）
-      const r2 = extractRoot(S.cbct.vol, Mt, t, nb(), { k: r.k ?? k0, threshold: r.threshold });
+      const r2 = extractRoot(ctVol(), Mt, t, nb(), { k: r.k ?? k0, threshold: r.threshold });
       if (!r2.error) r = r2;
-      else { const r3 = extractRoot(S.cbct.vol, Mt, t, nb(), { k: k0 }); if (r3.error) { ng.push(`${t.fdi}: ${r2.error}`); continue; } r = r3; }
+      else { const r3 = extractRoot(ctVol(), Mt, t, nb(), { k: k0 }); if (r3.error) { ng.push(`${t.fdi}: ${r2.error}`); continue; } r = r3; }
     }
     t.rootLength = +r.rootLength.toFixed(1);
     refreshTooth(arch, t);
@@ -1467,10 +1554,10 @@ async function autoRoots(teeth) {
   setVis('roots', true);
   updateRootPanel();
   const planned = JAWS.some((j) => S.plan[j]);
-  const fb = fits.filter((f) => isFinite(f.before)).map((f) => f.before).sort((a, b) => a - b);
+  const fb = fits.map((f) => f.shift).sort((a, b) => a - b);
   const medBefore = fb.length ? fb[fb.length >> 1] : NaN;
   $('autoRootStatus').innerHTML = `抽出できた歯: ${ok.length} 本${ng.length ? `<br><span class="danger">抽出できなかった歯（推定の歯根のまま）: ${ng.map((x) => x.split(':')[0]).join(', ')}（理由はログ）</span>` : ''}`
-    + (isFinite(medBefore) ? `<br>歯冠と CT の歯のずれ（合わせ直す前の中央値）: ${medBefore.toFixed(2)} mm${medBefore > 1.0 ? ' <span class="danger">— 全体の位置合わせが大きくずれています。「2 位置合わせ」で点を打ち直し「表面で微調整」をしてください</span>' : ''}` : '');
+    + (isFinite(medBefore) ? `<br>歯ごとの合わせ直し量（中央値）: ${medBefore.toFixed(2)} mm${medBefore > 1.0 ? ' <span class="danger">— 全体の位置合わせが大きくずれています。「2 位置合わせ」で点を打ち直してください</span>' : ''}` : '');
   log(`歯根の自動抽出: 成功 ${ok.length} 本 ${ok.join('、')}`, 'ok');
   for (const m of ng) log(m, 'warn');
   if (planned && alignAxis) log('歯軸が変わったので、「6 セットアップ」の自動排列をやり直してください（移動量は歯軸を基準にしています）', 'warn');
@@ -1530,7 +1617,7 @@ function drawSections(t) {
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
         const h = top - y * res, s = (x - W / 2) * res;
         const p = add(add(t.cervical, scale(z, h)), scale(u, s));
-        const v = sampleVolume(S.cbct.vol, mApply(inv, p));
+        const v = sampleVolume(ctVol(), mApply(inv, p));
         const g = Math.max(0, Math.min(255, ((v - lo) / ww) * 255));
         const o = 4 * (x + W * y);
         img.data[o] = img.data[o + 1] = img.data[o + 2] = g; img.data[o + 3] = 255;
@@ -1670,7 +1757,7 @@ function readSetupForm() {
   const o = S.setupOpt[S.setJaw];
   for (const [id, k, t] of OPT_FIELDS) o[k] = t === 'chk' ? $(id).checked : t === 'sel' ? $(id).value : parseFloat($(id).value) || 0;
 }
-for (const [id] of OPT_FIELDS) $(id).addEventListener('change', readSetupForm);
+for (const [id] of OPT_FIELDS) $(id).addEventListener('change', () => { readSetupForm(); S.setupReport[S.setJaw] = S.setupReport[S.setJaw] ? { ...S.setupReport[S.setJaw], curve: null } : null; drawGuides(); });
 const setSetJaw = (j) => { S.setJaw = j; $('setUpper').classList.toggle('on', j === 'upper'); $('setLower').classList.toggle('on', j === 'lower'); loadSetupForm(); renderSetupReport(); };
 $('setUpper').onclick = () => setSetJaw('upper');
 $('setLower').onclick = () => setSetJaw('lower');

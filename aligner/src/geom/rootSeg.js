@@ -172,19 +172,48 @@ export function extractRoot(vol, M, t, neighbors = [], opts = {}) {
   const centroids = [];
   let last = 0, maxRoots = 1;
   const rootsAt = [];
+  // 断面ごとに「歯根の明るさ」と「周囲（骨）の明るさ」を測ってしきい値を決める（深さで骨の濃さが変わるため）
+  const Tfloor = iLow + 0.2 * (iTooth - iLow);
+  const smooth2 = (src) => {
+    const o = new Float32Array(nSl);
+    for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
+      let s0 = 0, c0 = 0;
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+        const a = i + di, b2 = j + dj;
+        if (a < 0 || b2 < 0 || a >= nu || b2 >= nv) continue;
+        s0 += src[a + nu * b2]; c0++;
+      }
+      o[i + nu * j] = s0 / c0;
+    }
+    return o;
+  };
+  const medianOf = (vals) => { if (!vals.length) return NaN; vals.sort((x, y) => x - y); return vals[vals.length >> 1]; };
   for (let k = 1; k < nw; k++) {
     const off = nSl * k;
+    const Iv = smooth2(I.subarray(off, off + nSl));
     const grow = dilate2(prev, nu, nv);
-    let cur = new Uint8Array(nSl);
-    for (let q = 0; q < nSl; q++) cur[q] = grow[q] && allowed[off + q] && I[off + q] > T ? 1 : 0;
-    keepTouching(cur, prev, nu, nv);
-    fillHoles2(cur, nu, nv);
-    let a = area(cur);
-    if (a > prevArea * 1.12 + 3) {
-      // 急な拡大は骨への漏れとみなし、前の断面の範囲に制限
-      for (let q = 0; q < nSl; q++) cur[q] = cur[q] && prev[q];
-      a = area(cur);
+    const ringOuter = dilate2(dilate2(dilate2(prev, nu, nv), nu, nv), nu, nv);
+    const inV = [], outV = [];
+    for (let q = 0; q < nSl; q++) {
+      if (!allowed[off + q]) continue;
+      if (prev[q]) inV.push(Iv[q]); else if (ringOuter[q] && !grow[q]) outV.push(Iv[q]);
     }
+    const inside = medianOf(inV), outside = medianOf(outV);
+    // 歯根と周囲の差がなくなったら根尖とみなす
+    if (!(inside - outside > 0.12 * (iTooth - iLow))) break;
+    let Tk = Math.max(Tfloor, outside + kThr * (inside - outside));
+    let cur, a;
+    const make = () => {
+      cur = new Uint8Array(nSl);
+      for (let q = 0; q < nSl; q++) cur[q] = grow[q] && allowed[off + q] && Iv[q] > Tk ? 1 : 0;
+      keepTouching(cur, prev, nu, nv);
+      fillHoles2(cur, nu, nv);
+      a = area(cur);
+    };
+    make();
+    // 急に広がるのは骨への漏れ：しきい値を少しずつ上げて抑える（根が横へ開く動きは残す）
+    for (let tries = 0; tries < 6 && a > prevArea * 1.15 + 3; tries++) { Tk += 0.1 * (inside - outside); make(); }
+    if (a > prevArea * 1.15 + 3) { for (let q = 0; q < nSl; q++) cur[q] = cur[q] && prev[q]; a = area(cur); }
     if (a < 3) break;
     const comps = keepTouching(cur, cur, nu, nv);
     rootsAt.push(comps);
@@ -241,7 +270,7 @@ export function extractRoot(vol, M, t, neighbors = [], opts = {}) {
     let d0 = pc0.axes[0]; if (d0[2] < 0) d0 = scale(d0, -1);
     const ax0 = norm(add(add(scale(m, d0[0]), scale(b, d0[1])), scale(z, d0[2])));
     const rl0 = -(hStart - last * h), ex0 = t.info?.rootLength ?? 14;
-    if (rl0 > ex0 * 1.45 || rl0 < ex0 * 0.45) return { error: `歯根の長さが不自然です（${rl0.toFixed(1)} mm）`, threshold: T };
+    if (rl0 > ex0 * 1.6 || rl0 < ex0 * 0.4) return { error: `歯根の長さが不自然です（${rl0.toFixed(1)} mm）`, threshold: T };
     return { rootLength: rl0, axis: ax0, threshold: T, iTooth, iLow, tipDeg: (Math.atan2(dot(ax0, m), dot(ax0, z)) * 180) / Math.PI, torqueDeg: (Math.atan2(dot(ax0, b), dot(ax0, z)) * 180) / Math.PI };
   }
   const rootSlices = [];
@@ -270,8 +299,8 @@ export function extractRoot(vol, M, t, neighbors = [], opts = {}) {
   const rootLength = -(hStart - last * h);
   // 信頼性の確認：平均的な歯根長から大きく外れる場合は骨への漏れ・途切れとみなす
   const expect = t.info?.rootLength ?? 14;
-  if (rootLength > expect * 1.45) return { error: `歯根が骨と区別できませんでした（${rootLength.toFixed(1)} mm まで伸びたため不採用）。しきい値の位置を上げて再試行してください`, iTooth, iLow, threshold: T };
-  if (rootLength < expect * 0.45) return { error: `歯根を途中までしか追跡できませんでした（${rootLength.toFixed(1)} mm）。しきい値の位置を下げて再試行してください`, iTooth, iLow, threshold: T };
+  if (rootLength > expect * 1.6) return { error: `歯根が骨と区別できませんでした（${rootLength.toFixed(1)} mm まで伸びたため不採用）。しきい値の位置を上げて再試行してください`, iTooth, iLow, threshold: T };
+  if (rootLength < expect * 0.4) return { error: `歯根を途中までしか追跡できませんでした（${rootLength.toFixed(1)} mm）。しきい値の位置を下げて再試行してください`, iTooth, iLow, threshold: T };
   return {
     mesh, toothMesh, crownMesh, cejHeight, crownReach, crownSliceCount: upMasks.length, rootLength, axis, roots: maxRoots, threshold: T, iTooth, iLow,
     tipDeg: (Math.atan2(dot(axis, m), dot(axis, z)) * 180) / Math.PI,
