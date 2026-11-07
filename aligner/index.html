@@ -42,6 +42,7 @@
   button:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   button.on { background: color-mix(in srgb, var(--accent) 18%, var(--panel)); border-color: var(--accent); }
+  button.primary.on { background: var(--accent); color: var(--accent-ink); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
   button:disabled { opacity: .45; cursor: default; }
   .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
   .row > label { flex: 1; color: var(--muted); }
@@ -116,7 +117,7 @@
       <label class="btn file">DICOM フォルダを選ぶ<input type="file" id="fileDicomDir" webkitdirectory multiple></label>
       <label class="btn file">DICOM ファイルを選ぶ（複数可）<input type="file" id="fileDicom" multiple></label>
       <div class="status" id="statusCT">未読込</div>
-      <p class="note">非圧縮の DICOM に対応。大きいボリュームは自動で間引きます。読み込むと歯の立体表示と、スキャンとの自動位置合わせを行います（先にスキャンを読み込んでおいてください）。</p>
+      <p class="note">非圧縮の DICOM に対応。大きいボリュームは自動で間引きます。読み込むと歯の周囲を立体表示します。位置合わせは「2 位置合わせ」で基準点を打って行います。</p>
       <h2>フェイススキャン（OBJ）</h2>
       <label class="btn file">OBJ を選ぶ<input type="file" id="fileFace" accept=".obj"></label>
       <label class="btn file">テクスチャ画像（任意・先に選んでも可）<input type="file" id="fileFaceTex" accept="image/*"></label>
@@ -128,31 +129,40 @@
     </section>
 
     <section class="step" id="step-register">
-      <h2>自動位置合わせ</h2>
-      <p class="note">CBCT を読み込むと、歯の立体表示と「スキャン ⇄ CBCT」の位置合わせを自動で行います。顔スキャンは CBCT の皮膚表面と自動で合わせます。やり直すときは下のボタン。</p>
-      <div class="row"><button id="autoRegScan" class="primary">スキャン ⇄ CBCT</button><button id="autoRegFace" class="primary">顔 ⇄ CBCT</button></div>
-      <div class="status" id="regResult"></div>
-      <h2>CBCT の等値面</h2>
-      <div class="row"><label>しきい値 (HU)</label><input type="number" id="isoThr" value="1200" step="50"></div>
-      <div class="row"><label>間引き</label><select id="isoStep"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
-      <button id="makeIso">等値面を作成</button>
-      <div class="row"><label>断面表示</label><button id="toggleSlices">CBCT 断面</button></div>
+      <p class="note">基準点を打って合わせます。表の「CBCT」「スキャン」「顔」の欄を押すと、その点を打つ状態になります。ビュー上をクリックすると点が記録され、次の欄へ自動で進みます。点は CBCT の立体・断面のどちらにも打てます。</p>
+      <h2>CBCT の表示（点を打ちやすくする）</h2>
+      <div class="row"><button id="showBone">骨</button><button id="showSkin">皮膚</button><button id="toggleSlices">断面</button><button id="showTeethIso">歯</button></div>
       <div class="row"><label>軸位</label><input type="range" id="sliceZ" min="0" max="1" step="0.001" value="0.5"></div>
       <div class="row"><label>冠状</label><input type="range" id="sliceY" min="0" max="1" step="0.001" value="0.5"></div>
       <div class="row"><label>矢状</label><input type="range" id="sliceX" min="0" max="1" step="0.001" value="0.5"></div>
       <div class="row"><label>WL / WW</label><input type="number" id="winL" value="800" step="50"><input type="number" id="winW" value="3000" step="100"></div>
-      <h2>手動：対応点による位置合わせ（自動でずれたとき）</h2>
-      <div class="row"><label>動かすデータ</label><select id="regTarget"><option value="cbct">CBCT</option><option value="face">フェイススキャン</option></select></div>
-      <div class="row">
-        <button id="pickMoving">① 動かす側の点を打つ</button>
-        <button id="pickFixed">② スキャン側の点を打つ</button>
-      </div>
-      <div class="status" id="regStatus">点: 0 / 0（3点以上、同じ順番で）</div>
-      <div class="row"><button id="regClear">点をクリア</button><button id="regSolve" class="primary">位置合わせ</button></div>
-      <div class="row"><button id="regICP">ICP で微調整（CBCT 等値面 ⇄ スキャン）</button></div>
-      <p class="note">例：左右の犬歯尖頭・中切歯切縁・大臼歯の頬側咬頭など、両方のデータで見える点を同じ順で選びます。</p>
-      <h2>表示</h2>
+
+      <h2>① 基準平面（CBCT の骨で指定）</h2>
+      <table id="refTable"></table>
+      <div class="row"><button id="showRefPlanes">平面を表示</button><button id="useRefFrame" class="primary">基準座標で表示</button></div>
+      <div class="status" id="refStatus"></div>
+      <p class="note">カンペル平面：ANS と左右外耳道中央の3点を通る面。正中矢状面：カンペル平面に垂直で ANS と N を通る面（N がなければ左右外耳道中央の中点）。「基準座標で表示」にすると、カンペル平面が水平・正中が縦になり、「正面」「上」などの視点がこの座標系になります。外耳道中央は軸位断面を外耳道の高さに合わせて、断面の上でクリックすると打ちやすいです。</p>
+
+      <h2>② 口腔内スキャン ⇄ CBCT（対応点）</h2>
+      <div class="row"><label>点のセット</label><select id="scanPreset"><option value="upper">上顎 5点</option><option value="lower">下顎 5点</option><option value="both">上下 各3点</option></select><button id="scanPresetApply">表を作り直す</button></div>
+      <table id="scanLmTable"></table>
+      <div class="row"><button id="scanLmAdd">点を追加</button><button id="scanLmClear">点をクリア</button></div>
+      <div class="row"><button id="scanLmSolve" class="primary">対応点で合わせる</button><button id="scanLmRefine">表面で微調整</button><button id="scanLmUndo">元に戻す</button></div>
+      <div class="status" id="regResult"></div>
+
+      <h2>③ 顔スキャン ⇄ CBCT（軟組織の対応点）</h2>
+      <table id="faceLmTable"></table>
+      <div class="row"><button id="faceLmAdd">点を追加</button><button id="faceLmClear">点をクリア</button></div>
+      <div class="row"><button id="faceLmSolve" class="primary">対応点で合わせる</button><button id="faceLmRefine">表面で微調整</button></div>
+      <div class="status" id="faceRegResult"></div>
       <div class="row"><label>顔の透明度</label><input type="range" id="faceOpacity" min="0" max="1" step="0.05" value="0.6"></div>
+
+      <h2>自動（参考）</h2>
+      <p class="note">点を打たずに自動で合わせます。データによっては大きく外れるので、結果を必ず確認してください。</p>
+      <div class="row"><button id="autoRegScan">スキャン ⇄ CBCT</button><button id="autoRegFace">顔 ⇄ CBCT</button></div>
+      <h2>CBCT の等値面（歯）</h2>
+      <div class="row"><label>しきい値</label><input type="number" id="isoThr" value="1200" step="50"></div>
+      <div class="row"><label>間引き</label><select id="isoStep"><option>1</option><option selected>2</option><option>3</option><option>4</option></select><button id="makeIso">作り直す</button></div>
     </section>
 
     <section class="step" id="step-segment">

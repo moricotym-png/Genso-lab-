@@ -1,7 +1,7 @@
 // Aligner Studio — 画面とワークフロー
 import { Viewer, LABEL_COLORS, makeSliceMesh, meshToGeometry, THREE } from './viewer.js';
 import { Mesh, mergeMeshes } from '../core/mesh.js';
-import { mApply, mMul, mInvRigid, mTranslate, mIdentity, sub, add, scale, dot, norm } from '../core/vec.js';
+import { mApply, mMul, mInvRigid, mTranslate, mIdentity, sub, add, scale, dot, norm, cross } from '../core/vec.js';
 import { parseSTL, writeSTL } from '../io/stl.js';
 import { parseOBJ } from '../io/obj.js';
 import { parseDicomFile, buildVolume, volumeMatrix, sampleVolume } from '../io/dicom.js';
@@ -22,7 +22,7 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.4（自動位置合わせ改良）';
+export const APP_VERSION = 'v0.5（基準点で位置合わせ・カンペル平面）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -45,7 +45,6 @@ const S = {
   setJaw: 'upper',
   mode: null,
   seedFdi: 17,
-  reg: { moving: [], fixed: [] },
   vis: { upper: true, lower: true, scan: true, gingiva: true, roots: false, iso: true, slices: false, face: true, shell: true },
 };
 
@@ -153,7 +152,7 @@ function updateScanStatus() {
 $('fileUpper').onchange = (e) => e.target.files[0] && withBusy('STL 読込中…', async () => { await loadScan('upper', await readFile(e.target.files[0]), e.target.files[0].name); viewer.fit(); });
 $('fileLower').onchange = (e) => e.target.files[0] && withBusy('STL 読込中…', async () => { await loadScan('lower', await readFile(e.target.files[0]), e.target.files[0].name); viewer.fit(); });
 
-async function loadDicomFiles(files, { autoAlign = true } = {}) {
+async function loadDicomFiles(files, { autoAlign = false } = {}) {
   const list = [...files].filter((f) => !/\.(txt|xml|jpg|png|html?)$/i.test(f.name));
   const slices = [];
   let fails = 0, firstErr = null;
@@ -165,7 +164,7 @@ async function loadDicomFiles(files, { autoAlign = true } = {}) {
   busy(true, 'ボリューム構築中…', 0.9); await tick();
   await setVolume(buildVolume(slices), { autoAlign, fails });
 }
-async function setVolume(vol, { autoAlign = true, fails = 0 } = {}) {
+async function setVolume(vol, { autoAlign = false, fails = 0 } = {}) {
   const Mv = volumeMatrix(vol);
   // 初期配置：CBCT の中心をスキャンの中心へ
   const c = mApply(Mv, vol.dims.map((d) => (d - 1) / 2));
@@ -192,6 +191,10 @@ async function setVolume(vol, { autoAlign = true, fails = 0 } = {}) {
   log(`しきい値（自動）: 歯 ${Math.round(dth.teeth)} / 骨 ${Math.round(dth.bone)} / 皮膚 ${Math.round(th.skin)}${roi.found ? '（歯の範囲を自動検出）' : '（歯の範囲が見つからず全体を使用）'}`);
   if (autoAlign && (S.scans.upper || S.scans.lower)) await autoAlignScanCbct();
   if (autoAlign && S.face) await autoAlignFace();
+  S.cbct.bone = null; S.cbct.skin = null;
+  redrawCbctExtras();
+  renderLmTables();
+  if (!autoAlign) log('CBCT を読み込みました。「2 位置合わせ」で基準点を打って合わせてください', 'ok');
   viewer.fit();
 }
 /** 歯の範囲（切り出し済み）の等値面を作る */
@@ -308,11 +311,11 @@ async function autoAlignFace() {
 $('autoRegScan').onclick = () => {
   if (!S.cbct) return alert('先に CBCT を読み込んでください');
   if (!S.scans.upper && !S.scans.lower) return alert('先に口腔内スキャンを読み込んでください');
-  withBusy('自動位置合わせ中…', async () => { if (!S.cbct.iso) buildIso(); await autoAlignScanCbct(); });
+  withBusy('自動位置合わせ中…', async () => { if (!S.cbct.iso) buildIso(); await autoAlignScanCbct(); redrawCbctExtras(); renderLmTables(); });
 };
 $('autoRegFace').onclick = () => {
   if (!S.face) return alert('先に顔スキャンを読み込んでください');
-  withBusy('自動位置合わせ中…', autoAlignFace);
+  withBusy('自動位置合わせ中…', async () => { await autoAlignFace(); renderLmTables(); });
 };
 function scanCenter() {
   const pts = [];
@@ -338,7 +341,7 @@ async function loadFace(text, texURL = null) {
 $('fileFace').onchange = (e) => e.target.files[0] && withBusy('OBJ 読込中…', async () => {
   S.face = null;
   await loadFace(await readFile(e.target.files[0], 'text'), S.pendingTex || null);
-  if (S.cbct) await autoAlignFace();
+  renderLmTables();
 });
 $('fileFaceTex').onchange = (e) => e.target.files[0] && withBusy('画像読込中…', async () => {
   const url = await readFile(e.target.files[0], 'url');
@@ -402,7 +405,6 @@ function refreshScanColors(jaw) {
 }
 function drawSeeds() {
   viewer.clearMarkers();
-  if (S.mode === 'regMoving' || S.mode === 'regFixed') return drawRegMarkers();
   for (const j of JAWS) {
     if (!S.scans[j] || j !== S.segJaw) continue;
     for (const s of S.seeds[j]) {
@@ -511,53 +513,279 @@ $('makeIso').onclick = () => {
   if (!S.cbct) return alert('先に CBCT を読み込んでください');
   withBusy('等値面を作成中…', async () => { buildIso(); setVis('iso', true); });
 };
-function movingObject() {
-  const t = $('regTarget').value;
-  return t === 'cbct' ? (S.cbct ? { M: S.cbct.M, objs: [viewer.group('iso'), viewer.group('slices')] } : null) : S.face ? { M: S.face.M, objs: [viewer.group('face')] } : null;
-}
-function drawRegMarkers() {
-  viewer.clearMarkers();
-  const mv = movingObject();
-  for (const p of S.reg.moving) viewer.addMarker(mv ? mApply(mv.M, p) : p, 0xff4466, 0.5);
-  for (const p of S.reg.fixed) viewer.addMarker(p, 0x22aa66, 0.5);
-  $('regStatus').textContent = `点: 動かす側 ${S.reg.moving.length} / スキャン側 ${S.reg.fixed.length}（3点以上、同じ順番で）`;
-}
-$('pickMoving').onclick = () => setMode(S.mode === 'regMoving' ? null : 'regMoving');
-$('pickFixed').onclick = () => setMode(S.mode === 'regFixed' ? null : 'regFixed');
-$('regClear').onclick = () => { S.reg = { moving: [], fixed: [] }; drawRegMarkers(); };
-$('regTarget').onchange = () => { S.reg = { moving: [], fixed: [] }; drawRegMarkers(); };
-$('regSolve').onclick = () => {
-  const n = Math.min(S.reg.moving.length, S.reg.fixed.length);
-  if (n < 3) return alert('対応点が 3 組以上必要です');
-  const M = rigidFromPairs(S.reg.moving.slice(0, n), S.reg.fixed.slice(0, n));
-  const err = rmsError(M, S.reg.moving.slice(0, n), S.reg.fixed.slice(0, n));
-  setMovingMatrix(M);
-  $('regResult').textContent = `対応点の誤差 (RMS): ${err.toFixed(2)} mm`;
-  log(`位置合わせ完了 RMS ${err.toFixed(2)} mm`);
-  drawRegMarkers();
+// ---- 基準点（ランドマーク） ----
+// CBCT の点は CBCT 自身の座標（位置合わせ行列をかける前）、スキャンの点はスキャン座標、顔の点は顔スキャン自身の座標で保存する
+const REF_POINTS = [
+  { key: 'ANS', name: 'ANS（前鼻棘）' },
+  { key: 'REAM', name: '右 外耳道中央' },
+  { key: 'LEAM', name: '左 外耳道中央' },
+  { key: 'N', name: 'N（ナジオン）' },
+];
+const SCAN_PRESETS = {
+  upper: ['右上6 近心頬側咬頭頂', '右上3 尖頭', '上顎中切歯間 切縁', '左上3 尖頭', '左上6 近心頬側咬頭頂'],
+  lower: ['右下6 近心頬側咬頭頂', '右下3 尖頭', '下顎中切歯間 切縁', '左下3 尖頭', '左下6 近心頬側咬頭頂'],
+  both: ['右上6 近心頬側咬頭頂', '上顎中切歯間 切縁', '左上6 近心頬側咬頭頂', '右下6 近心頬側咬頭頂', '下顎中切歯間 切縁', '左下6 近心頬側咬頭頂'],
 };
-function setMovingMatrix(M) {
-  if ($('regTarget').value === 'cbct') { S.cbct.M = M; drawIso(); drawSlices(); } else { S.face.M = M; drawFace(); }
+const FACE_POINTS = ['軟組織ナジオン', '鼻尖', '右 外眼角', '左 外眼角', '軟組織ポゴニオン'];
+S.lm = {
+  ref: {},
+  scan: SCAN_PRESETS.upper.map((name) => ({ name, cbct: null, scan: null })),
+  face: FACE_POINTS.map((name) => ({ name, cbct: null, face: null })),
+  showPlanes: true, useFrame: false,
+};
+S.lmTarget = null; // { set: 'ref'|'scan'|'face', idx|key, side: 'cbct'|'scan'|'face' }
+
+const cbctToWorld = (p) => mApply(S.cbct.M, p);
+const fmt = (p) => (p ? '✓' : '—');
+function lmCell(set, idx, side, p) {
+  const on = S.lmTarget && S.lmTarget.set === set && S.lmTarget.idx === idx && S.lmTarget.side === side;
+  return `<td><button data-set="${set}" data-idx="${idx}" data-side="${side}" class="${on ? 'on' : ''}" style="min-width:52px">${on ? '打つ…' : fmt(p)}</button></td>`;
 }
-$('regICP').onclick = () => {
-  if (!S.cbct?.iso) return alert('先に CBCT の等値面を作成してください');
-  withBusy('ICP 計算中…', async () => {
-    // スキャン（歯冠を優先）→ CBCT 等値面 を合わせ、その逆を CBCT に適用
-    const pts = [];
-    for (const j of JAWS) {
-      const sm = S.scans[j];
-      if (!sm) continue;
-      const L = S.labels[j];
-      for (let i = 0; i < sm.nv; i++) if (!L || L[i] > 0) pts.push(sm.positions[3 * i], sm.positions[3 * i + 1], sm.positions[3 * i + 2]);
-    }
-    const iso = S.cbct.iso.transformed(S.cbct.M);
-    const r = icp(Float32Array.from(pts), iso.positions, mIdentity(), { iterations: 40, maxDist: 2.5, samples: 4000 });
-    S.cbct.M = mMul(mInvRigid(r.matrix), S.cbct.M);
-    drawIso(); drawSlices();
-    $('regResult').textContent = `ICP 誤差 (RMS): ${r.rms.toFixed(2)} mm`;
-    log(`ICP 完了 RMS ${r.rms.toFixed(2)} mm`);
+function renderLmTables() {
+  // 基準平面
+  $('refTable').innerHTML = '<tr><th>点</th><th>CBCT</th></tr>' + REF_POINTS.map((r) => `<tr><td>${r.name}</td>${lmCell('ref', r.key, 'cbct', S.lm.ref[r.key])}</tr>`).join('');
+  const err = S.lm.scanErr || [];
+  $('scanLmTable').innerHTML = '<tr><th>#</th><th>点</th><th>CBCT</th><th>スキャン</th><th>誤差</th></tr>' + S.lm.scan.map((q, i) =>
+    `<tr><td>${i + 1}</td><td>${q.name}</td>${lmCell('scan', i, 'cbct', q.cbct)}${lmCell('scan', i, 'scan', q.scan)}<td>${err[i] != null ? err[i].toFixed(2) : ''}</td></tr>`).join('');
+  const ferr = S.lm.faceErr || [];
+  $('faceLmTable').innerHTML = '<tr><th>#</th><th>点</th><th>CBCT</th><th>顔</th><th>誤差</th></tr>' + S.lm.face.map((q, i) =>
+    `<tr><td>${i + 1}</td><td>${q.name}</td>${lmCell('face', i, 'cbct', q.cbct)}${lmCell('face', i, 'face', q.face)}<td>${ferr[i] != null ? ferr[i].toFixed(2) : ''}</td></tr>`).join('');
+  for (const tb of ['refTable', 'scanLmTable', 'faceLmTable']) for (const b of $(tb).querySelectorAll('button')) {
+    b.onclick = () => {
+      const idx = b.dataset.set === 'ref' ? b.dataset.idx : +b.dataset.idx;
+      const t = { set: b.dataset.set, idx, side: b.dataset.side };
+      if (S.lmTarget && S.lmTarget.set === t.set && S.lmTarget.idx === t.idx && S.lmTarget.side === t.side) { S.lmTarget = null; setMode(null); }
+      else { S.lmTarget = t; setMode('lm'); }
+      renderLmTables();
+    };
+  }
+  drawLmMarkers();
+  updateRefFrame();
+}
+function lmName(t) {
+  if (t.set === 'ref') return REF_POINTS.find((r) => r.key === t.idx).name;
+  return `${t.idx + 1}. ${S.lm[t.set][t.idx].name}`;
+}
+function drawLmMarkers() {
+  viewer.clearMarkers();
+  const tab = document.querySelector('#tabs button.on')?.dataset.step;
+  if (tab !== 'register') return drawSeeds();
+  if (S.cbct) for (const r of REF_POINTS) {
+    const p = S.lm.ref[r.key];
+    if (!p) continue;
+    const w = cbctToWorld(p);
+    viewer.addMarker(w, 0x3b82f6, 0.8); viewer.addLabel(w, r.key, '#9cc3ff');
+  }
+  S.lm.scan.forEach((q, i) => {
+    if (q.cbct && S.cbct) { const w = cbctToWorld(q.cbct); viewer.addMarker(w, 0xff4466, 0.55); viewer.addLabel(w, `${i + 1}`, '#ff8fa6'); }
+    if (q.scan) { viewer.addMarker(q.scan, 0x22aa66, 0.55); viewer.addLabel(q.scan, `${i + 1}`, '#7ee2a8'); }
+  });
+  S.lm.face.forEach((q, i) => {
+    if (q.cbct && S.cbct) { const w = cbctToWorld(q.cbct); viewer.addMarker(w, 0xff9f1c, 0.7); viewer.addLabel(w, `F${i + 1}`, '#ffc46b'); }
+    if (q.face && S.face) { const w = mApply(S.face.M, q.face); viewer.addMarker(w, 0xb36bff, 0.7); viewer.addLabel(w, `F${i + 1}`, '#d4a8ff'); }
+  });
+}
+/** 次に打つ欄へ進む（同じ側の次の点。全部埋まったら反対側の最初の空き） */
+function advanceLm() {
+  const t = S.lmTarget;
+  if (!t) return;
+  if (t.set === 'ref') {
+    const i = REF_POINTS.findIndex((r) => r.key === t.idx);
+    const nxt = REF_POINTS.slice(i + 1).find((r) => !S.lm.ref[r.key]);
+    S.lmTarget = nxt ? { ...t, idx: nxt.key } : null;
+  } else {
+    const list = S.lm[t.set];
+    const other = t.set === 'scan' ? (t.side === 'cbct' ? 'scan' : 'cbct') : (t.side === 'cbct' ? 'face' : 'cbct');
+    let j = list.findIndex((q, k) => k > t.idx && !q[t.side]);
+    if (j >= 0) S.lmTarget = { ...t, idx: j };
+    else { j = list.findIndex((q) => !q[other]); S.lmTarget = j >= 0 ? { ...t, side: other, idx: j } : null; }
+  }
+  if (!S.lmTarget) setMode(null); else setMode('lm');
+}
+function lmPick(e) {
+  const t = S.lmTarget;
+  if (!t) return;
+  if (t.side === 'cbct') {
+    if (!S.cbct) return alert('先に CBCT を読み込んでください');
+    const hit = viewer.pick(e, ['iso', 'bone', 'skin', 'slices'].map((g) => viewer.group(g)));
+    if (!hit) return;
+    const p = mApply(mInvRigid(S.cbct.M), [hit.point.x, hit.point.y, hit.point.z]);
+    if (t.set === 'ref') S.lm.ref[t.idx] = p; else S.lm[t.set][t.idx].cbct = p;
+  } else if (t.side === 'scan') {
+    const hit = viewer.pick(e, JAWS.flatMap((j) => [viewer.group(`scan_${j}`), viewer.group(`teeth_${j}`)]));
+    if (!hit) return;
+    S.lm.scan[t.idx].scan = [hit.point.x, hit.point.y, hit.point.z];
+  } else {
+    if (!S.face) return alert('先に顔スキャンを読み込んでください');
+    const hit = viewer.pick(e, [viewer.group('face')]);
+    if (!hit) return;
+    S.lm.face[t.idx].face = mApply(mInvRigid(S.face.M), [hit.point.x, hit.point.y, hit.point.z]);
+  }
+  advanceLm();
+  renderLmTables();
+}
+
+// 基準平面（カンペル平面・正中矢状面）と患者座標系
+function refFrame() {
+  const r = S.lm.ref;
+  if (!S.cbct || !r.ANS || !r.REAM || !r.LEAM) return null;
+  const A = cbctToWorld(r.ANS), R = cbctToWorld(r.REAM), L = cbctToWorld(r.LEAM);
+  const earMid = scale(add(R, L), 0.5);
+  let z = norm(cross(sub(L, A), sub(R, A)));
+  // 上向き：N があれば N 側、なければ CT の頭側
+  const upHint = r.N ? sub(cbctToWorld(r.N), A) : sub(mApply(S.cbct.M, [0, 0, 100]), mApply(S.cbct.M, [0, 0, 0]));
+  if (dot(z, upHint) < 0) z = scale(z, -1);
+  const midRef = r.N ? cbctToWorld(r.N) : earMid;
+  // 正中矢状面：カンペル平面の法線と、ANS→（N または外耳道中点）を含む面。その法線を左右軸にする
+  let x = norm(cross(sub(midRef, A), z));
+  if (dot(x, sub(L, R)) < 0) x = scale(x, -1); // x = 患者の左
+  const y = cross(z, x); // 後方（LPS 右手系）
+  const F = [x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, z[0], z[1], z[2], 0, A[0], A[1], A[2], 1];
+  const angle = (u, v) => (Math.acos(Math.max(-1, Math.min(1, dot(norm(u), norm(v))))) * 180) / Math.PI;
+  return { F, A, R, L, x, y, z, earMid, earDist: Math.hypot(...sub(L, R)), asym: Math.abs(dot(sub(R, A), x) + dot(sub(L, A), x)) / 2, tilt: angle(z, upHint) };
+}
+function updateRefFrame() {
+  viewer.clearGroup('refplanes');
+  const f = refFrame();
+  if (!f) {
+    $('refStatus').textContent = 'ANS・左右外耳道中央の3点を打つとカンペル平面ができます。';
+    if (S.lm.useFrame) { S.lm.useFrame = false; viewer.setDisplayFrame(null); }
+    $('useRefFrame').classList.remove('on');
+    return;
+  }
+  if (S.lm.showPlanes) {
+    const size = Math.max(90, f.earDist * 1.3);
+    const cC = add(scale(add(f.A, f.earMid), 0.5), [0, 0, 0]);
+    viewer.addPlane('refplanes', cC, f.z, size, 0x3b82f6, f.x);
+    viewer.addPlane('refplanes', cC, f.x, size, 0xef4444, f.y);
+  }
+  $('showRefPlanes').classList.toggle('on', S.lm.showPlanes);
+  $('useRefFrame').classList.toggle('on', S.lm.useFrame);
+  if (S.lm.useFrame) viewer.setDisplayFrame(f.F);
+  $('refStatus').innerHTML = `カンペル平面（青）・正中矢状面（赤）を設定。外耳道中央の間隔 ${f.earDist.toFixed(1)} mm、正中からの左右差 ${f.asym.toFixed(1)} mm${S.lm.ref.N ? '' : '（N 未設定：外耳道の中点を正中に使用）'}`;
+}
+$('showRefPlanes').onclick = () => { S.lm.showPlanes = !S.lm.showPlanes; updateRefFrame(); };
+$('useRefFrame').onclick = () => {
+  if (!refFrame()) return alert('ANS と左右外耳道中央を先に指定してください');
+  S.lm.useFrame = !S.lm.useFrame;
+  if (!S.lm.useFrame) viewer.setDisplayFrame(null);
+  updateRefFrame();
+  viewer.fit();
+  viewer.view('front');
+};
+
+// 対応点で合わせる
+function pairs(list, a, b) { return list.filter((q) => q[a] && q[b]); }
+$('scanLmSolve').onclick = () => {
+  if (!S.cbct) return alert('先に CBCT を読み込んでください');
+  const ps = pairs(S.lm.scan, 'cbct', 'scan');
+  if (ps.length < 3) return alert('CBCT とスキャンの両方に打った点が 3 組以上必要です');
+  const M = rigidFromPairs(ps.map((q) => q.cbct), ps.map((q) => q.scan)); // CBCT → スキャン
+  setCbctMatrix(M, '対応点');
+};
+function setCbctMatrix(M, how) {
+  S.lm.prevM = S.cbct.M;
+  if (S.face?.alignedToCbct) { S.face.M = mMul(M, mMul(mInvRigid(S.cbct.M), S.face.M)); drawFace(); }
+  S.cbct.M = M;
+  drawIso(); drawSlices(); redrawCbctExtras();
+  const ps = pairs(S.lm.scan, 'cbct', 'scan');
+  S.lm.scanErr = S.lm.scan.map((q) => (q.cbct && q.scan ? Math.hypot(...sub(mApply(M, q.cbct), q.scan)) : null));
+  const rms = ps.length ? Math.sqrt(ps.reduce((s0, q) => s0 + Math.hypot(...sub(mApply(M, q.cbct), q.scan)) ** 2, 0) / ps.length) : NaN;
+  const msg = `スキャン⇄CBCT（${how}）: 対応点の誤差 RMS ${isFinite(rms) ? rms.toFixed(2) : '—'} mm（${ps.length} 点）`;
+  $('regResult').textContent = msg;
+  log(msg, isFinite(rms) && rms > 1.5 ? 'warn' : 'ok');
+  if (isFinite(rms) && rms > 1.5) log('誤差が大きい点（表の「誤差」列）を打ち直してください', 'warn');
+  renderLmTables();
+}
+$('scanLmUndo').onclick = () => { if (S.lm.prevM) { const m = S.lm.prevM; setCbctMatrix(m, '元に戻す'); S.lm.prevM = null; } };
+$('scanLmRefine').onclick = () => {
+  if (!S.cbct?.iso) return alert('先に CBCT を読み込んでください');
+  withBusy('表面で微調整中…', async () => {
+    const up = scanUp();
+    const pts = crownPoints(up);
+    // 現在位置の近くだけを探す（大きく外れない）。スキャン→CBCT で ICP し、逆をかける
+    const r = icp(pts, S.cbct.iso.positions, mInvRigid(S.cbct.M), { iterations: 40, maxDist: 1.5, samples: 5000 });
+    const before = S.cbct.M;
+    const M = mInvRigid(r.matrix);
+    // 対応点の誤差が大きく悪化したら採用しない
+    const ps = pairs(S.lm.scan, 'cbct', 'scan');
+    const e = (MM) => (ps.length ? Math.sqrt(ps.reduce((s0, q) => s0 + Math.hypot(...sub(mApply(MM, q.cbct), q.scan)) ** 2, 0) / ps.length) : 0);
+    if (ps.length >= 3 && e(M) > e(before) + 1.0) { log(`微調整で対応点の誤差が ${e(before).toFixed(2)} → ${e(M).toFixed(2)} mm に悪化したため、採用しませんでした`, 'warn'); return; }
+    setCbctMatrix(M, `表面で微調整, 表面の誤差 ${r.rms.toFixed(2)} mm`);
   });
 };
+$('scanLmAdd').onclick = () => { S.lm.scan.push({ name: `追加点 ${S.lm.scan.length + 1}`, cbct: null, scan: null }); renderLmTables(); };
+$('scanLmClear').onclick = () => { if (!confirm('スキャン⇄CBCT の点をすべて消しますか？')) return; S.lm.scan = SCAN_PRESETS[$('scanPreset').value].map((name) => ({ name, cbct: null, scan: null })); S.lm.scanErr = null; renderLmTables(); };
+$('scanPresetApply').onclick = () => {
+  if (S.lm.scan.some((q) => q.cbct || q.scan) && !confirm('打った点は消えます。よろしいですか？')) return;
+  S.lm.scan = SCAN_PRESETS[$('scanPreset').value].map((name) => ({ name, cbct: null, scan: null })); S.lm.scanErr = null; renderLmTables();
+};
+$('faceLmSolve').onclick = () => {
+  if (!S.cbct || !S.face) return alert('CBCT と顔スキャンの両方が必要です');
+  const ps = pairs(S.lm.face, 'cbct', 'face');
+  if (ps.length < 3) return alert('CBCT と顔の両方に打った点が 3 組以上必要です');
+  const T = rigidFromPairs(ps.map((q) => q.face), ps.map((q) => q.cbct)); // 顔 → CBCT
+  setFaceToCbct(T, '対応点');
+};
+function setFaceToCbct(T, how) {
+  S.face.M = mMul(S.cbct.M, T);
+  S.face.alignedToCbct = true;
+  drawFace();
+  const ps = pairs(S.lm.face, 'cbct', 'face');
+  S.lm.faceErr = S.lm.face.map((q) => (q.cbct && q.face ? Math.hypot(...sub(mApply(T, q.face), q.cbct)) : null));
+  const rms = ps.length ? Math.sqrt(ps.reduce((s0, q) => s0 + Math.hypot(...sub(mApply(T, q.face), q.cbct)) ** 2, 0) / ps.length) : NaN;
+  const msg = `顔⇄CBCT（${how}）: 対応点の誤差 RMS ${isFinite(rms) ? rms.toFixed(2) : '—'} mm（${ps.length} 点）`;
+  $('faceRegResult').textContent = msg;
+  log(msg, isFinite(rms) && rms > 2.5 ? 'warn' : 'ok');
+  renderLmTables();
+}
+$('faceLmRefine').onclick = () => {
+  if (!S.cbct || !S.face) return;
+  withBusy('顔を皮膚表面で微調整中…', async () => {
+    ensureSkin();
+    const T0 = mMul(mInvRigid(S.cbct.M), S.face.M); // 顔 → CBCT
+    const r = icp(S.face.obj.positions, S.cbct.skin.positions, T0, { iterations: 40, maxDist: 3, samples: 6000 });
+    setFaceToCbct(r.matrix, `皮膚表面で微調整, 表面の誤差 ${r.rms.toFixed(2)} mm`);
+  });
+};
+$('faceLmAdd').onclick = () => { S.lm.face.push({ name: `追加点 ${S.lm.face.length + 1}`, cbct: null, face: null }); renderLmTables(); };
+$('faceLmClear').onclick = () => { if (!confirm('顔⇄CBCT の点をすべて消しますか？')) return; S.lm.face = FACE_POINTS.map((name) => ({ name, cbct: null, face: null })); S.lm.faceErr = null; renderLmTables(); };
+
+// 点を打つための CBCT 表示（骨・皮膚の立体）
+function ensureSkin() {
+  if (S.cbct.skin) return;
+  const vol = S.cbct.vol, Mv = volumeMatrix(vol);
+  const step = vol.dims[0] * vol.dims[1] * vol.dims[2] > 8e6 ? 2 : 1;
+  S.cbct.skin = volumeIsosurface(vol, S.cbct.thr.skin, step, (i, j, k) => mApply(Mv, [i, j, k]));
+}
+function ensureBone() {
+  if (S.cbct.bone) return;
+  const vol = S.cbct.vol, Mv = volumeMatrix(vol);
+  const step = vol.dims[0] * vol.dims[1] * vol.dims[2] > 8e6 ? 2 : 1;
+  S.cbct.bone = volumeIsosurface(vol, S.cbct.thr.bone, step, (i, j, k) => mApply(Mv, [i, j, k]));
+}
+function redrawCbctExtras() {
+  for (const [g, key, color, op] of [['bone', 'bone', 0xe9e2cf, 0.9], ['skin', 'skin', 0xf0c8b0, 0.45]]) {
+    viewer.clearGroup(g);
+    if (S.cbct?.[key]) viewer.addMesh(g, S.cbct[key], { color, opacity: op, matrix: S.cbct.M, doubleSide: true });
+  }
+  viewer.setVisible('bone', !!S.vis.bone);
+  viewer.setVisible('skin', !!S.vis.skin);
+  $('showBone').classList.toggle('on', !!S.vis.bone);
+  $('showSkin').classList.toggle('on', !!S.vis.skin);
+  $('toggleSlices').classList.toggle('on', !!S.vis.slices);
+  $('showTeethIso').classList.toggle('on', !!S.vis.iso);
+}
+$('showBone').onclick = () => {
+  if (!S.cbct) return alert('先に CBCT を読み込んでください');
+  withBusy('骨の立体を作成中…', async () => { ensureBone(); S.vis.bone = !S.vis.bone; redrawCbctExtras(); });
+};
+$('showSkin').onclick = () => {
+  if (!S.cbct) return alert('先に CBCT を読み込んでください');
+  withBusy('皮膚の立体を作成中…', async () => { ensureSkin(); S.vis.skin = !S.vis.skin; redrawCbctExtras(); });
+};
+$('toggleSlices').onclick = () => { setVis('slices', !S.vis.slices); redrawCbctExtras(); };
+$('showTeethIso').onclick = () => { setVis('iso', !S.vis.iso); redrawCbctExtras(); };
 
 // ------------------------------------------------------------------ 歯の分割
 function buildFdiGrid() {
@@ -628,15 +856,14 @@ function setMode(m) {
   $('seedMode').classList.toggle('on', m === 'seed');
   $('gumSeedMode').classList.toggle('on', m === 'gumseed');
   $('brushMode').classList.toggle('on', m === 'brush');
-  $('pickMoving').classList.toggle('on', m === 'regMoving');
-  $('pickFixed').classList.toggle('on', m === 'regFixed');
   viewer.controls.enableRotate = m !== 'brush';
   const hints = {
     seed: `歯 ${S.seedFdi} の歯冠をクリック`, gumseed: '歯肉をクリック（境界がうまく出ない所に）', brush: 'ドラッグで塗る（回転は無効）',
-    regMoving: '動かす側（CBCT 等値面／顔）の点をクリック', regFixed: '口腔内スキャン上の対応する点をクリック',
+    lm: S.lmTarget ? `「${lmName(S.lmTarget)}」を ${S.lmTarget.side === 'cbct' ? 'CBCT（立体または断面）' : S.lmTarget.side === 'scan' ? '口腔内スキャン' : '顔スキャン'} 上でクリック（Esc で中止）` : '',
   };
   $('hint').textContent = hints[m] || '左ドラッグ: 回転 / 右ドラッグ: 平行移動 / ホイール: 拡大 / 歯をクリックで選択';
-  if (m === 'regMoving' || m === 'regFixed') drawRegMarkers(); else drawSeeds();
+  if (m !== 'lm' && S.lmTarget) { S.lmTarget = null; renderLmTables(); }
+  drawLmMarkers();
 }
 function hitVertex(hit) {
   const f = hit.face;
@@ -670,24 +897,7 @@ viewer.pickHandler = (e) => {
     return;
   }
   if (m === 'brush') return brushAt(e);
-  if (m === 'regMoving') {
-    const mv = movingObject();
-    if (!mv) return alert('動かすデータがありません');
-    const hit = viewer.pick(e, mv.objs);
-    if (!hit) return;
-    S.reg.moving.push(mApply(mInvRigid(mv.M), [hit.point.x, hit.point.y, hit.point.z]));
-    drawRegMarkers();
-    return;
-  }
-  if (m === 'regFixed') {
-    const objs = [];
-    for (const j of JAWS) objs.push(viewer.group(`scan_${j}`), viewer.group(`teeth_${j}`));
-    const hit = viewer.pick(e, objs);
-    if (!hit) return;
-    S.reg.fixed.push([hit.point.x, hit.point.y, hit.point.z]);
-    drawRegMarkers();
-    return;
-  }
+  if (m === 'lm') return lmPick(e);
   // 歯の選択
   const hit = viewer.pick(e, JAWS.map((j) => viewer.group(`teeth_${j}`)));
   if (hit && hit.object.userData.fdi) selectTooth(hit.object.userData.fdi);
@@ -761,7 +971,7 @@ $('poseReset').onclick = () => {
 // ギズモ
 const pivot = new THREE.Object3D();
 pivot.matrixAutoUpdate = true;
-viewer.scene.add(pivot);
+viewer.root.add(pivot); // データ座標で扱う
 let gizmoStart = null;
 function syncGizmo() {
   const t = S.sel ? toothOf(S.sel) : null;
@@ -780,13 +990,14 @@ function syncGizmo() {
 viewer.gizmo.addEventListener('mouseDown', () => {
   const t = toothOf(S.sel);
   const plan = S.plan[archOfFdi(S.sel)];
-  gizmoStart = { M: poseMatrix(t, poseAt(plan, t.fdi, S.stage)), P: pivot.matrixWorld.clone() };
+  pivot.updateMatrix();
+  gizmoStart = { M: poseMatrix(t, poseAt(plan, t.fdi, S.stage)), P: pivot.matrix.clone() };
 });
 viewer.gizmo.addEventListener('objectChange', () => {
   if (!gizmoStart) return;
   const t = toothOf(S.sel);
-  pivot.updateMatrixWorld(true);
-  const delta = pivot.matrixWorld.clone().multiply(gizmoStart.P.clone().invert());
+  pivot.updateMatrix();
+  const delta = pivot.matrix.clone().multiply(gizmoStart.P.clone().invert());
   const Mnew = delta.multiply(new THREE.Matrix4().fromArray(gizmoStart.M));
   const pose = matrixToPose(t, Mnew.elements);
   const jaw = archOfFdi(S.sel);
@@ -1277,6 +1488,7 @@ $('saveProject').onclick = () => {
     faceMatrix: S.face?.M || null, faceTex: S.face?.texURL || null,
     hasTeeth: { upper: !!S.arches.upper, lower: !!S.arches.lower },
     limits: readLimits(), shell: shellParams(),
+    landmarks: { ref: S.lm.ref, scan: S.lm.scan, face: S.lm.face, useFrame: S.lm.useFrame, showPlanes: S.lm.showPlanes },
   };
   files.push({ name: 'project.json', data: JSON.stringify(proj) });
   for (const j of JAWS) {
@@ -1308,6 +1520,7 @@ $('openProject').onchange = (e) => e.target.files[0] && withBusy('プロジェ�
   if (zip.get('face.obj')) { S.face = { M: proj.faceMatrix }; await loadFace(new TextDecoder().decode(zip.get('face.obj')), proj.faceTex); }
   if (proj.cbctMatrix) { S.pendingCbctMatrix = proj.cbctMatrix; log('CBCT の位置合わせ情報があります。DICOM を読み込むと復元されます'); }
   if (proj.caseId) $('caseId').value = proj.caseId;
+  if (proj.landmarks) { Object.assign(S.lm, proj.landmarks); renderLmTables(); }
   loadSetupForm();
   afterPlanChange(true);
   viewer.fit();
@@ -1316,8 +1529,8 @@ $('openProject').onchange = (e) => e.target.files[0] && withBusy('プロジェ�
 // CBCT 読込時に保存済みの位置合わせを復元
 const _loadDicom = loadDicomFiles;
 async function loadDicomWithRestore(files) {
-  await _loadDicom(files, { autoAlign: !S.pendingCbctMatrix });
-  if (S.pendingCbctMatrix && S.cbct) { S.cbct.M = S.pendingCbctMatrix; S.pendingCbctMatrix = null; drawSlices(); log('CBCT の位置合わせを復元しました'); }
+  await _loadDicom(files, { autoAlign: false });
+  if (S.pendingCbctMatrix && S.cbct) { S.cbct.M = S.pendingCbctMatrix; S.pendingCbctMatrix = null; drawIso(); drawSlices(); redrawCbctExtras(); renderLmTables(); log('CBCT の位置合わせを復元しました'); }
 }
 $('fileDicomDir').onchange = (e) => e.target.files.length && withBusy('DICOM 読込中…', () => loadDicomWithRestore(e.target.files));
 $('fileDicom').onchange = (e) => e.target.files.length && withBusy('DICOM 読込中…', () => loadDicomWithRestore(e.target.files));

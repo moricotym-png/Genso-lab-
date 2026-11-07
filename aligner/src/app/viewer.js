@@ -49,7 +49,7 @@ export class Viewer {
     this.scene.add(this.gizmoHelper);
     this.gizmo.addEventListener('dragging-changed', (e) => { this.controls.enabled = !e.value; });
     this.markers = new THREE.Group();
-    this.scene.add(this.markers);
+    this.root.add(this.markers); // データ座標で置く（基準座標で表示を回しても一緒に動く）
     this.pickHandler = null;
     this._down = null;
     canvas.addEventListener('pointerdown', (e) => { this._down = [e.clientX, e.clientY, e.button]; });
@@ -146,7 +146,54 @@ export class Viewer {
     const list = [];
     for (const o of objects) o.traverse((q) => { if (q.isMesh && q.visible && isVisibleChain(q)) list.push(q); });
     const hits = this.raycaster.intersectObjects(list, false);
-    return hits[0] || null;
+    const h = hits[0] || null;
+    // 表示全体（root）を回している場合でも、データの座標で返す
+    if (h) { this.root.updateMatrixWorld(true); h.point.applyMatrix4(this.root.matrixWorld.clone().invert()); }
+    return h;
+  }
+
+  /** 表示の座標系をそろえる（F: 患者座標 → データ座標 の 4x4 列優先。null で解除） */
+  setDisplayFrame(F) {
+    this.root.matrixAutoUpdate = false;
+    if (F) this.root.matrix.fromArray(F).invert(); else this.root.matrix.identity();
+    this.root.matrixWorldNeedsUpdate = true;
+  }
+
+  /** 番号などの文字ラベル（常に手前に表示） */
+  addLabel(p, text, color = '#ffffff', bg = 'rgba(0,0,0,0.65)') {
+    const cv = document.createElement('canvas');
+    const ctx = cv.getContext('2d');
+    ctx.font = 'bold 28px sans-serif';
+    const w = Math.ceil(ctx.measureText(text).width) + 16;
+    cv.width = w; cv.height = 40;
+    ctx.font = 'bold 28px sans-serif';
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, w, 40);
+    ctx.fillStyle = color; ctx.fillText(text, 8, 30);
+    const tex = new THREE.CanvasTexture(cv);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+    sp.position.set(p[0], p[1], p[2]);
+    sp.scale.set(w / 12, 40 / 12, 1);
+    sp.center.set(-0.15, -0.15);
+    sp.renderOrder = 11;
+    this.markers.add(sp);
+    return sp;
+  }
+
+  /** 平面（中心・法線・大きさ）を半透明の四角で表示 */
+  addPlane(groupName, center, normal, size, color, uDir = null) {
+    const n = new THREE.Vector3(...normal).normalize();
+    const u = uDir ? new THREE.Vector3(...uDir) : new THREE.Vector3(Math.abs(n.x) < 0.9 ? 1 : 0, Math.abs(n.x) < 0.9 ? 0 : 1, 0);
+    u.sub(n.clone().multiplyScalar(u.dot(n))).normalize();
+    const v = n.clone().cross(u);
+    const g = new THREE.PlaneGeometry(size, size);
+    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }));
+    m.matrixAutoUpdate = false;
+    m.matrix.makeBasis(u, v, n).setPosition(new THREE.Vector3(...center));
+    this.group(groupName).add(m);
+    const edge = new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({ color }));
+    edge.matrixAutoUpdate = false; edge.matrix.copy(m.matrix);
+    this.group(groupName).add(edge);
+    return m;
   }
 
   addMarker(p, color = 0xff3355, size = 0.6) {
@@ -156,7 +203,7 @@ export class Viewer {
     this.markers.add(m);
     return m;
   }
-  clearMarkers() { for (const c of [...this.markers.children]) { this.markers.remove(c); c.geometry.dispose(); c.material.dispose(); } }
+  clearMarkers() { for (const c of [...this.markers.children]) { this.markers.remove(c); c.geometry?.dispose(); c.material.map?.dispose(); c.material.dispose(); } }
 
   snapshot() { return this.renderer.domElement.toDataURL('image/png'); }
 }
