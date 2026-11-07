@@ -9,7 +9,7 @@ import { parseDicomFile, buildVolume, volumeMatrix, sampleVolume } from '../io/d
 import { makeZip, readZip } from '../io/zip.js';
 import { rigidFromPairs, rmsError, icp, autoRegister, frontFacingCandidates, PointGrid } from '../geom/register.js';
 import { volumeThresholds, findDentalROI, cropVolume, dentalThresholds } from '../geom/volstats.js';
-import { segmentTeeth, paintLabels } from '../geom/segment.js';
+import { segmentTeeth, paintLabels, fillRegion, concavity, labelCounts } from '../geom/segment.js';
 import { extractRoot } from '../geom/rootSeg.js';
 import { volumeIsosurface, smoothVolume, removeSmallParts } from '../geom/isosurface.js';
 import { poseMatrix, matrixToPose, attachmentMesh, buccalAnchor } from '../geom/tooth.js';
@@ -24,7 +24,7 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.10（顔を歯で位置合わせ・欠損歯）';
+export const APP_VERSION = 'v0.11（歯冠を手で塗って修正）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -996,6 +996,9 @@ function buildFdiGrid() {
     b.style.borderBottom = `3px solid rgb(${c.map((x) => Math.round(x * 255)).join(',')})`;
     b.classList.toggle('on', fdi === S.seedFdi);
     if (S.seeds[S.segJaw].some((s) => s.label === fdi)) b.style.fontWeight = '700';
+    const cnt = S.labelCount?.[S.segJaw]?.get(fdi) || 0;
+    if (cnt > 0) { b.style.background = `rgba(${c.map((x) => Math.round(x * 255)).join(',')},0.55)`; b.title = `${cnt.toLocaleString()} 点`; }
+    if ((S.mode === 'brush' || S.mode === 'fill') && S.paintLabel === fdi) b.style.outline = '2px solid var(--accent)';
     const miss = S.missing[S.segJaw].includes(fdi);
     if (miss) { b.style.textDecoration = 'line-through'; b.style.opacity = '0.4'; b.title = '欠損'; }
     b.onclick = () => {
@@ -1006,14 +1009,16 @@ function buildFdiGrid() {
         return;
       }
       if (miss) return;
-      S.seedFdi = fdi; setMode('seed'); buildFdiGrid();
+      S.seedFdi = fdi;
+      S.paintLabel = fdi;
+      if (S.mode === 'brush' || S.mode === 'fill') setMode(S.mode); else if (S.mode === 'erase') setMode('brush'); else setMode('seed');
+      buildFdiGrid();
     };
     g.append(b);
   }
   $('missingList').textContent = S.missing[S.segJaw].length ? `欠損: ${[...S.missing[S.segJaw]].sort((a, b) => a - b).join(', ')}` : '';
   $('missingMode').classList.toggle('on', !!S.missingMode);
-  const sel = $('brushLabel');
-  sel.innerHTML = '<option value="0">歯肉 (0)</option>' + order.map((f) => `<option value="${f}">${f}</option>`).join('');
+  $('paintStatus').textContent = S.mode === 'erase' ? '消しゴム（歯肉に戻す）' : S.paintLabel ? `塗る番号: ${S.paintLabel}` : '塗る番号: —（上の番号を押す）';
 }
 function setSegJaw(j) {
   S.segJaw = j;
@@ -1035,8 +1040,10 @@ $('segRun').onclick = () => {
   if (!S.scans[j]) return alert(`${JAW_JA[j]}のスキャンがありません`);
   if (!S.seeds[j].some((s) => s.label > 0)) return alert('歯冠にシードを置いてください');
   withBusy('分割中…', async () => {
+    if (S.labels[j]) pushUndo(j);
     S.labels[j] = segmentTeeth(S.scans[j], S.seeds[j], { concavityWeight: num('segWeight') });
     refreshScanColors(j);
+    afterPaint(j);
     setVis('scan', true);
     const n = new Set(S.labels[j]).size - 1;
     $('segStatus').textContent = `${JAW_JA[j]}: ${n} 本に分割。必要ならブラシで修正し「歯を作成」へ。`;
@@ -1067,9 +1074,19 @@ function setMode(m) {
   $('seedMode').classList.toggle('on', m === 'seed');
   $('gumSeedMode').classList.toggle('on', m === 'gumseed');
   $('brushMode').classList.toggle('on', m === 'brush');
-  viewer.controls.enableRotate = m !== 'brush';
+  $('fillMode').classList.toggle('on', m === 'fill');
+  $('eraseMode').classList.toggle('on', m === 'erase');
+  // 塗るときは左ドラッグを塗りに使い、回転は右ドラッグ・移動は中ボタンへ
+  const painting = m === 'brush' || m === 'erase';
+  viewer.controls.enableRotate = true;
+  viewer.controls.mouseButtons = painting ? { LEFT: -1, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE } : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+  if (!painting) brushCursor.visible = false;
+  if ((painting || m === 'fill') && S.scans[S.segJaw]) { ensureLabels(S.segJaw); setVis('scan', true); }
   const hints = {
-    seed: `歯 ${S.seedFdi} の歯冠をクリック`, gumseed: '歯肉をクリック（境界がうまく出ない所に）', brush: 'ドラッグで塗る（回転は無効）',
+    seed: `歯 ${S.seedFdi} の歯冠をクリック`, gumseed: '歯肉をクリック（境界がうまく出ない所に）',
+    brush: `歯 ${S.paintLabel ?? '—'} を左ドラッグで塗る（右ドラッグ: 回転 / ホイール: 拡大 / Esc: 終了）`,
+    erase: '左ドラッグで歯肉に戻す（右ドラッグ: 回転 / Esc: 終了）',
+    fill: `歯 ${S.paintLabel ?? '—'} の歯冠をクリックすると、くぼみで囲まれた範囲を塗りつぶし`,
     lm: S.lmTarget ? `「${lmName(S.lmTarget)}」を ${S.lmTarget.side === 'cbct' ? 'CBCT（立体または断面）' : S.lmTarget.side === 'scan' ? '口腔内スキャン' : '顔スキャン'} 上でクリック（Esc で中止）` : '',
   };
   $('hint').textContent = hints[m] || '左ドラッグ: 回転 / 右ドラッグ: 平行移動 / ホイール: 拡大 / 歯をクリックで選択';
@@ -1109,21 +1126,128 @@ viewer.pickHandler = (e) => {
     drawSeeds();
     return;
   }
-  if (m === 'brush') return brushAt(e);
+  if (m === 'brush' || m === 'erase') return;
+  if (m === 'fill') return fillAt(e);
   if (m === 'lm') return lmPick(e);
   // 歯の選択
   const hit = viewer.pick(e, JAWS.map((j) => viewer.group(`teeth_${j}`)));
   if (hit && hit.object.userData.fdi) selectTooth(hit.object.userData.fdi);
 };
+// ---- 手で塗る ----
+S.paintLabel = null; // 塗る番号（0 = 歯肉）
+S.paintUndo = { upper: [], lower: [] };
+function ensureLabels(j) {
+  if (!S.labels[j]) { S.labels[j] = new Int32Array(S.scans[j].nv); refreshScanColors(j); }
+  if (!S.scanConcav) S.scanConcav = {};
+  if (!S.scanConcav[j] || S.scanConcav[j].length !== S.scans[j].nv) S.scanConcav[j] = concavity(S.scans[j]);
+}
+function pushUndo(j) {
+  const u = S.paintUndo[j];
+  u.push(S.labels[j].slice());
+  if (u.length > 20) u.shift();
+}
+function paintOpts(j) {
+  return { barrier: $('brushBarrier').checked ? S.scanConcav[j] : null, barrierThr: num('brushBarrierThr'), protect: $('brushProtect').checked };
+}
+/** 塗り替えた頂点だけ色を更新 */
+function updateColorsAt(j, idx) {
+  const m = viewer.group(`scan_${j}`).children[0];
+  if (!m || !idx.length) return;
+  const attr = m.geometry.attributes.color;
+  const L = S.labels[j], sh = S.scanShade[j], hasCol = !!S.scanColors[j];
+  for (const i of idx) {
+    let c = scanBase(j, i);
+    const lc = L[i] ? LABEL_COLORS.get(L[i]) || [0.8, 0.8, 0.8] : null;
+    if (lc) c = hasCol ? c.map((x, k) => x * 0.45 + lc[k] * 0.55) : lc;
+    else if (!hasCol) c = LABEL_COLORS.get(0);
+    const f = sh ? sh[i] : 1;
+    attr.array[3 * i] = c[0] * f; attr.array[3 * i + 1] = c[1] * f; attr.array[3 * i + 2] = c[2] * f;
+  }
+  attr.needsUpdate = true;
+}
+function paintLabelNow() { return S.mode === 'erase' ? 0 : S.paintLabel; }
 function brushAt(e) {
   const j = S.segJaw;
-  if (!S.labels[j]) return;
+  if (!S.scans[j]) return;
+  const lab = paintLabelNow();
+  if (lab === null || lab === undefined) { $('paintStatus').textContent = '先に上の番号を押してください'; return; }
   const hit = viewer.pick(e, scanObjs(j));
   if (!hit) return;
-  paintLabels(S.scans[j], S.labels[j], hitVertex(hit), num('brushR'), parseInt($('brushLabel').value, 10));
-  refreshScanColors(j);
+  ensureLabels(j);
+  const changed = paintLabels(S.scans[j], S.labels[j], hitVertex(hit), num('brushR'), lab, paintOpts(j));
+  updateColorsAt(j, changed);
 }
-viewer.moveHandler = (e) => { if (S.mode === 'brush') brushAt(e); };
+function fillAt(e) {
+  const j = S.segJaw;
+  if (!S.scans[j]) return;
+  const lab = S.paintLabel;
+  if (lab === null || lab === undefined) { $('paintStatus').textContent = '先に上の番号を押してください'; return; }
+  const hit = viewer.pick(e, scanObjs(j));
+  if (!hit) return;
+  ensureLabels(j);
+  pushUndo(j);
+  const o = paintOpts(j);
+  const changed = fillRegion(S.scans[j], S.labels[j], hitVertex(hit), lab, { barrier: S.scanConcav[j], barrierThr: o.barrierThr, protect: o.protect, maxRadius: 7 });
+  updateColorsAt(j, changed);
+  afterPaint(j);
+}
+function afterPaint(j) {
+  const cnt = labelCounts(S.labels[j]);
+  S.labelCount = S.labelCount || {};
+  S.labelCount[j] = cnt;
+  buildFdiGrid();
+}
+// ストロークの開始・終了（元に戻す用の記録と、本数の更新）
+viewer.canvas.addEventListener('pointerdown', (e) => {
+  if ((S.mode === 'brush' || S.mode === 'erase') && e.button === 0 && S.scans[S.segJaw]) {
+    ensureLabels(S.segJaw); pushUndo(S.segJaw); S.painting = true; brushAt(e);
+  }
+});
+window.addEventListener('pointerup', () => { if (S.painting) { S.painting = false; afterPaint(S.segJaw); } });
+let moveQueued = null;
+viewer.moveHandler = (e) => {
+  if (!(S.mode === 'brush' || S.mode === 'erase') || !S.painting) return;
+  // 重いピック処理を描画フレームごとに 1 回に間引く
+  if (moveQueued) { moveQueued = e; return; }
+  moveQueued = e;
+  requestAnimationFrame(() => { const ev = moveQueued; moveQueued = null; brushAt(ev); });
+};
+// ブラシの大きさを示す丸（カーソル）
+const brushCursor = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 12), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthTest: false }));
+brushCursor.visible = false; brushCursor.renderOrder = 12;
+viewer.root.add(brushCursor);
+let hoverQueued = false;
+viewer.canvas.addEventListener('pointermove', (e) => {
+  if (!(S.mode === 'brush' || S.mode === 'erase') || e.buttons !== 0) { if (!S.painting) brushCursor.visible = false; return; }
+  if (hoverQueued) return;
+  hoverQueued = true;
+  requestAnimationFrame(() => {
+    hoverQueued = false;
+    const hit = S.scans[S.segJaw] ? viewer.pick(e, scanObjs(S.segJaw)) : null;
+    brushCursor.visible = !!hit;
+    if (hit) { brushCursor.position.copy(hit.point); brushCursor.scale.setScalar(num('brushR')); brushCursor.material.color.setHex(S.mode === 'erase' ? 0xff6666 : 0xffffff); }
+  });
+});
+$('brushRSlider').oninput = () => { $('brushR').value = $('brushRSlider').value; };
+$('brushR').onchange = () => { $('brushRSlider').value = $('brushR').value; };
+$('fillMode').onclick = () => setMode(S.mode === 'fill' ? null : 'fill');
+$('eraseMode').onclick = () => setMode(S.mode === 'erase' ? null : 'erase');
+$('paintUndo').onclick = () => {
+  const j = S.segJaw, u = S.paintUndo[j];
+  if (!u.length) return;
+  S.labels[j] = u.pop();
+  refreshScanColors(j);
+  afterPaint(j);
+};
+$('toothErase').onclick = () => {
+  const j = S.segJaw, lab = S.paintLabel;
+  if (!S.labels[j] || !lab) return alert('消す歯の番号を押してください');
+  pushUndo(j);
+  const L = S.labels[j], ch = [];
+  for (let i = 0; i < L.length; i++) if (L[i] === lab) { L[i] = 0; ch.push(i); }
+  updateColorsAt(j, ch);
+  afterPaint(j);
+};
 
 // ------------------------------------------------------------------ 歯の選択・姿勢編集
 const archOfFdi = (fdi) => (Math.floor(fdi / 10) <= 2 ? 'upper' : 'lower');

@@ -150,17 +150,39 @@ export function faceLabels(mesh, labels) {
   return out;
 }
 
-/** ブラシ：中心頂点から半径 r 内（測地近似）の頂点に label を塗る */
-export function paintLabels(mesh, labels, centerVertex, radius, label) {
+/** 凹み具合（0=平ら・凸、大きいほど深いくぼみ＝歯頸線・歯間）。手塗りの境界判定に使う */
+export function concavity(mesh) {
+  const K = mesh.curvature(2);
+  const a = [];
+  for (let i = 0; i < K.length; i += Math.max(1, Math.floor(K.length / 20000))) a.push(Math.abs(K[i]));
+  a.sort((x, y) => x - y);
+  const sc = a[Math.floor(a.length * 0.9)] || 1;
+  const H = new Float32Array(K.length);
+  for (let i = 0; i < K.length; i++) H[i] = Math.max(0, -K[i] / sc);
+  return H;
+}
+
+/**
+ * ブラシ：中心頂点から半径 r 内（つながった面をたどる）の頂点に label を塗る
+ * opts.barrier（凹み具合）と opts.barrierThr を渡すと、深いくぼみ（歯頸線・歯間）を越えて広がらない
+ * opts.protect = true なら、他の歯のラベルが付いた頂点は塗り替えない
+ * 戻り値: 塗り替えた頂点番号の配列
+ */
+export function paintLabels(mesh, labels, centerVertex, radius, label, opts = {}) {
   const { off, nbr } = mesh.adjacency();
   const P = mesh.positions;
+  const { barrier = null, barrierThr = 1.0, protect = false } = opts;
   const c = [P[3 * centerVertex], P[3 * centerVertex + 1], P[3 * centerVertex + 2]];
   const seen = new Set([centerVertex]);
   const q = [centerVertex];
   const r2 = radius * radius;
+  const changed = [];
+  const canPaint = (v) => !(protect && label > 0 && labels[v] > 0 && labels[v] !== label);
   for (let i = 0; i < q.length; i++) {
     const v = q[i];
-    labels[v] = label;
+    if (canPaint(v) && labels[v] !== label) { labels[v] = label; changed.push(v); }
+    // 境界：くぼみの深い頂点は塗るが、その先へは広げない
+    if (barrier && i > 0 && barrier[v] > barrierThr) continue;
     for (let k = off[v]; k < off[v + 1]; k++) {
       const u = nbr[k];
       if (seen.has(u)) continue;
@@ -168,5 +190,20 @@ export function paintLabels(mesh, labels, centerVertex, radius, label) {
       if (d2 <= r2) { seen.add(u); q.push(u); }
     }
   }
-  return labels;
+  return changed;
+}
+
+/**
+ * 塗りつぶし：クリックした点から、くぼみ（歯頸線・歯間）で囲まれた範囲を塗る
+ * maxRadius で最大の広がりを制限（歯冠 1 本分程度）
+ */
+export function fillRegion(mesh, labels, seedVertex, label, { barrier, barrierThr = 1.0, maxRadius = 7, protect = false } = {}) {
+  return paintLabels(mesh, labels, seedVertex, maxRadius, label, { barrier, barrierThr, protect });
+}
+
+/** ラベルごとの頂点数 */
+export function labelCounts(labels) {
+  const m = new Map();
+  for (let i = 0; i < labels.length; i++) m.set(labels[i], (m.get(labels[i]) || 0) + 1);
+  return m;
 }
