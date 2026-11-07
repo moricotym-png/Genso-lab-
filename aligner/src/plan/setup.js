@@ -2,7 +2,7 @@
 import { add, sub, scale, dot, cross, norm, DEG, r3Axis, r3Mul, mApply } from '../core/vec.js';
 import { ArchCurve, fitArch, templateArch } from './archform.js';
 import { toArchLocal, fromArchLocal } from './arch.js';
-import { positionOf, sideOf, zeroPose } from './teeth.js';
+import { positionOf, sideOf, zeroPose, toothInfo } from './teeth.js';
 import { rotationToAngles, poseMatrix } from '../geom/tooth.js';
 import { contactReport } from './staging.js';
 import { archOrder } from './teeth.js';
@@ -22,6 +22,7 @@ export const DEFAULT_SETUP = {
   closeSpaces: true, // 空隙は前歯の後退で閉じる
   maxAutoAdvance: 1.5, // 叢生解消のために自動で許す前方拡大の上限 (mm)
   levelOffsets: {}, // 歯ごとの高さオフセット（mm, +咬合側）
+  keepMissingSpace: true, // 欠損部のスペースを保持（インプラント・ブリッジ用）。false なら閉じる
   lockAdvance: false, // true: 前後位置は指定値のまま（OJ 合わせ用）。残る叢生・空隙は警告で示す
 };
 
@@ -74,6 +75,21 @@ export function autoSetup(arch, options = {}) {
   const sides = [-1, 1];
   const bySide = (s) => [...teeth.values()].filter((t) => sideOf(t.fdi) === s).sort((a, b) => positionOf(a.fdi) - positionOf(b.fdi));
   const width = (t) => t.width;
+  // 欠損部の幅：同じ側で、2本の歯の間（または正中との間）に抜けている歯の標準的な歯冠幅の合計
+  const quadOf = (s) => (arch.jaw === 'upper' ? (s < 0 ? 1 : 2) : (s < 0 ? 4 : 3));
+  const gapWidth = (s, posFrom, posTo) => {
+    if (!opt.keepMissingSpace) return 0;
+    let w = 0;
+    for (let p = posFrom + 1; p < posTo; p++) { const f = quadOf(s) * 10 + p; if (!teeth.has(f)) w += toothInfo(f).crownWidth; }
+    return w;
+  };
+  const missingList = [];
+  for (const s of sides) {
+    const ex = bySide(s).map((t) => positionOf(t.fdi));
+    const maxP = Math.max(0, ...ex);
+    for (let p = 1; p < maxP; p++) if (!ex.includes(p)) missingList.push(quadOf(s) * 10 + p);
+  }
+  report.missing = missingList;
 
   // 必要量と利用可能量の差（叢生量）を計算
   const evalD = (adv) => {
@@ -83,7 +99,11 @@ export function autoSetup(arch, options = {}) {
       const list = bySide(s);
       const anchors = opt.keepMolars ? list.filter((t) => positionOf(t.fdi) >= 6) : [];
       const movable = list.filter((t) => !anchors.includes(t));
-      const req = movable.reduce((a, t) => a + width(t), 0);
+      let req = movable.reduce((a, t) => a + width(t), 0);
+      const posList = movable.map((t) => positionOf(t.fdi));
+      let prevP = 0;
+      for (const p of posList) { req += gapWidth(s, prevP, p); prevP = p; }
+      if (anchors[0]) req += gapWidth(s, prevP, positionOf(anchors[0].fdi));
       let avail = Infinity;
       if (anchors.length) {
         const a0 = anchors[0];
@@ -125,6 +145,7 @@ export function autoSetup(arch, options = {}) {
       const { movable, anchors } = e.res[s];
       let sAcc = 0;
       movable.forEach((t, i) => {
+        sAcc += gapWidth(s, i > 0 ? positionOf(movable[i - 1].fdi) : 0, positionOf(t.fdi)); // 欠損部のスペース
         const w = width(t) - iprAt(t, movable[i + 1] || anchors[0]) / 2 - (i > 0 ? iprAt(movable[i - 1], t) / 2 : 0);
         sPos.set(t.fdi, sMid + xSign[s] * (sAcc + w / 2));
         sAcc += w;
@@ -147,7 +168,7 @@ export function autoSetup(arch, options = {}) {
         const c1 = movable[0], other = centrals.find((t) => t !== c1);
         if (c1 && other && positionOf(c1.fdi) === 1) shift += errOf(err, c1, other) / 2; // 正中の接触は左右で半分ずつ
         movable.forEach((t, i) => {
-          if (i > 0) shift += errOf(err, movable[i - 1], t) - iprAt(movable[i - 1], t);
+          if (i > 0) shift += errOf(err, movable[i - 1], t) - iprAt(movable[i - 1], t) + gapWidth(s, positionOf(movable[i - 1].fdi), positionOf(t.fdi));
           if (Math.abs(shift) > 0.02) {
             // 1回の補正量を制限（形状が特殊な歯で補正が暴走しないように）
             const st = Math.max(-3, Math.min(3, shift * 0.8));
@@ -167,7 +188,7 @@ export function autoSetup(arch, options = {}) {
     for (const s of sides) {
       const { movable, anchors } = e.res[s];
       const last = movable[movable.length - 1];
-      residual[s] = last && anchors[0] ? errOf(err, last, anchors[0]) - iprAt(last, anchors[0]) : 0;
+      residual[s] = last && anchors[0] ? errOf(err, last, anchors[0]) - iprAt(last, anchors[0]) + gapWidth(s, positionOf(last.fdi), positionOf(anchors[0].fdi)) : 0;
     }
     return { targets, curve, residual, ev: e };
   };

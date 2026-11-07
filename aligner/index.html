@@ -161,7 +161,9 @@
       <div class="row"><button id="scanLmSolve" class="primary">対応点で合わせる</button><button id="scanLmRefine">表面で微調整</button><button id="scanLmUndo">元に戻す</button></div>
       <div class="status" id="regResult"></div>
 
-      <h2>③ 顔スキャン ⇄ CBCT（軟組織の対応点）</h2>
+      <h2>③ 顔スキャンの位置合わせ</h2>
+      <div class="row"><label>合わせる相手</label><select id="faceTarget"><option value="scan">口腔内スキャン（スマイルの歯で合わせる）</option><option value="cbct">CBCT（軟組織で合わせる）</option></select></div>
+      <p class="note" id="faceTargetNote">スマイルで見えている前歯の歯間（切縁側の鼓形空隙の頂点）や犬歯の尖頭を、顔スキャンと口腔内スキャンの両方に同じ順で打ちます。</p>
       <table id="faceLmTable"></table>
       <div class="row"><button id="faceLmAdd">点を追加</button><button id="faceLmClear">点をクリア</button></div>
       <div class="row"><button id="faceLmSolve" class="primary">対応点で合わせる</button><button id="faceLmRefine">表面で微調整</button></div>
@@ -182,6 +184,8 @@
       <h2>シード（歯冠を1回ずつクリック）</h2>
       <div class="fdi-grid" id="fdiGrid"></div>
       <div class="row"><button id="seedMode">シード配置モード</button><button id="gumSeedMode">歯肉シード</button><button id="seedClear">シードをクリア</button></div>
+      <div class="row"><button id="missingMode">欠損歯を指定</button><span class="status" id="missingList"></span></div>
+      <p class="note">欠損歯は「欠損歯を指定」を押してから番号をクリック（もう一度押すと解除）。シード配置はその歯を飛ばして進みます。</p>
       <p class="note">番号を選んでから歯冠をクリック。クリックごとに次の歯へ自動で進みます（右最後方 → 左最後方）。</p>
       <h2>自動分割</h2>
       <div class="row"><label>境界の強さ</label><input type="number" id="segWeight" value="4" step="0.5"></div>
@@ -246,6 +250,7 @@
       <div class="row"><label><input type="checkbox" id="optRot" checked> 捻転を除く</label></div>
       <div class="row"><label><input type="checkbox" id="optMid" checked> 正中を合わせる</label></div>
       <div class="row"><label><input type="checkbox" id="optClose" checked> 空隙を閉じる</label></div>
+      <div class="row"><label><input type="checkbox" id="optKeepMissing" checked> 欠損部のスペースを保持（インプラント・ブリッジ用。外すと閉じる）</label></div>
       <div class="row"><button id="runSetup" class="primary">自動排列</button><button id="runSetupBoth">上下とも</button><button id="fitOJOB">OJ/OB を目標へ</button></div>
       <div id="setupReport"></div>
       <h2>目標位置の手修正</h2>
