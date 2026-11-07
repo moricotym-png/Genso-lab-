@@ -150,9 +150,10 @@
 
       <h2>① 基準平面（CBCT の骨で指定）</h2>
       <table id="refTable"></table>
+      <div class="row"><label>水平の基準</label><select id="refPlane"><option value="camper">カンペル平面（ANS–外耳道中央）</option><option value="fh">フランクフルト平面（ポリオン–オルビターレ）</option></select></div>
       <div class="row"><button id="showRefPlanes">平面を表示</button><button id="useRefFrame" class="primary">基準座標で表示</button></div>
       <div class="status" id="refStatus"></div>
-      <p class="note">カンペル平面：ANS と左右外耳道中央の3点を通る面。正中矢状面：カンペル平面に垂直で ANS と N を通る面（N がなければ左右外耳道中央の中点）。「基準座標で表示」にすると、カンペル平面が水平・正中が縦になり、「正面」「上」などの視点がこの座標系になります。外耳道中央は軸位断面を外耳道の高さに合わせて、断面の上でクリックすると打ちやすいです。</p>
+      <p class="note">カンペル平面：ANS と左右外耳道中央の3点を通る面（青）。フランクフルト平面（FH）：左右ポリオン（外耳道上縁）とオルビターレ（眼窩下縁の最下点、左右あれば中点）を通る面（緑）。使う点だけ打てば十分です。正中矢状面：選んだ水平の基準に垂直で ANS と N を通る面（片方がなければ左右の点の中点）。「基準座標で表示」にすると、選んだ平面が水平・正中が縦になり、「正面」「上」などの視点がこの座標系になります。外耳道中央は軸位断面を外耳道の高さに合わせて、断面の上でクリックすると打ちやすいです。</p>
 
       <h2>② 口腔内スキャン ⇄ CBCT（対応点）</h2>
       <div class="row"><label>点のセット</label><select id="scanPreset"><option value="upper">上顎 5点</option><option value="lower">下顎 5点</option><option value="both">上下 各3点</option></select><button id="scanPresetApply">表を作り直す</button></div>
@@ -263,6 +264,9 @@
       <div class="row"><label><input type="checkbox" id="optMid" checked> 正中を合わせる</label></div>
       <div class="row"><label><input type="checkbox" id="optClose" checked> 空隙を閉じる</label></div>
       <div class="row"><label><input type="checkbox" id="optKeepMissing" checked> 欠損部のスペースを保持（インプラント・ブリッジ用。外すと閉じる）</label></div>
+      <div class="row"><label>排列の基準</label><select id="archRef"><option value="none">歯列から推定</option><option value="fh">正中矢状面＋フランクフルト平面（左右）</option><option value="camper">正中矢状面＋カンペル平面（左右）</option></select></div>
+      <div class="status" id="archRefStatus"></div>
+      <p class="note">頭部の基準を使うと、歯列の正中を正中矢状面に合わせ、咬合平面の左右の傾き（カント）を選んだ平面と平行にそろえて並べます（前後の傾きは歯列のまま）。CBCT と口腔内スキャンの位置合わせと、「2 位置合わせ」の基準点が必要です。</p>
       <div class="row"><button id="runSetup" class="primary">自動排列</button><button id="runSetupBoth">上下とも</button><button id="fitOJOB">OJ/OB を目標へ</button></div>
       <div id="setupReport"></div>
       <h2>ツール</h2>
@@ -316,7 +320,9 @@
       <div class="row"><label>トリム：歯頸線から歯肉側へ (mm)</label><input type="number" id="shTrim" value="1.0" step="0.25"></div>
       <div class="row"><label>平滑化（回）</label><input type="number" id="shSmooth" value="4" step="1"></div>
       <div class="row"><label>間引きの許容誤差 (mm, 0=しない)</label><input type="number" id="shDec" value="0.01" step="0.005"></div>
-      <div class="row"><label><input type="checkbox" id="shBlock"> アンダーカットをブロックアウト</label></div>
+      <div class="row"><label>アンダーカットのブロックアウト</label><select id="shBlock"><option value="none">しない</option><option value="tight">きつめ（0.4 mm 残す）</option><option value="std">標準（0.25 mm 残す）</option><option value="loose">ゆるめ（0.1 mm 残す）</option><option value="full">すべて埋める（0 mm）</option><option value="custom">数値で指定</option></select></div>
+      <div class="row"><label>残すアンダーカット (mm)</label><input type="number" id="shBlockDepth" value="0.25" step="0.05" min="0" disabled></div>
+      <p class="note">着脱方向から見て最膨隆部より下のアンダーカットを、表面から「残す量」より深い部分だけ埋めます。残す量が大きいほど維持力が強く（きつく）、小さいほど着脱しやすく（ゆるく）なります。乳歯・混合歯列や萌出途中の歯、歯冠の短い歯、歯周病で鼓形空隙が大きい歯ではゆるめ、成人で維持が足りないときはきつめが目安です。</p>
       <div class="row"><label>トリムラインの形</label><select id="shTrimStyle"><option value="scallop">スカラップ（歯頸線に沿う）</option><option value="straight">ストレート（歯肉側をなだらかに）</option></select></div>
       <div class="row"><label><input type="checkbox" id="shPontic" checked> 欠損部にポンティックを入れる</label></div>
       <p class="note">数値は初期値です。材料・プリンターの推奨値と試作で確認してください（LuxCreo の資料では部位別厚みの例として前歯 0.5 mm・臼歯 0.8 mm が挙げられています）。</p>

@@ -158,6 +158,36 @@ test('シェルは水密で、厚み相当の体積を持つ', () => {
   assert.ok(r.volume > 300, `volume ${r.volume}`);
 });
 
+test('ブロックアウト量：残す量が大きいほど埋める体積は減り、どれも水密', () => {
+  const arch = demo();
+  const vols = [];
+  for (const blockoutDepth of [null, 0.4, 0]) {
+    const input = shellInput(arch, new Map(), { voxel: 0.4, thickness: 0.6, clearance: 0.05, decimateError: 0, smooth: 0, blockoutDepth }, () => 0.6);
+    const r = generateShell(input);
+    assert.ok(r.check.watertight, JSON.stringify(r.check));
+    vols.push(r.volume);
+  }
+  // 内面が外へ出る（アンダーカットに入らない）ほどシェル体積は変わる：なし・一部・全部の順に単調
+  const [none, part, full] = vols;
+  assert.ok((part - none) * (full - part) >= -1e-6, `volumes ${vols}`);
+  assert.notEqual(none, full);
+});
+
+test('歯列座標系を基準（正中矢状面＋左右軸）に合わせる', async () => {
+  const { alignArchFrame } = await import('../src/plan/arch.js');
+  const { dot, norm } = await import('../src/core/vec.js');
+  const arch = demo();
+  const ez0 = [...arch.frame.ez];
+  const x = norm([1, 0, 0.12]); // 少し傾いた左右軸
+  const r = alignArchFrame(arch, { x, A: [1.5, 0, 0] });
+  assert.ok(Math.abs(dot(arch.frame.ez, x)) < 1e-9); // 左右の傾きが基準にそろう
+  assert.ok(Math.abs(dot(arch.frame.ex, x)) > 0.999999);
+  assert.ok(Math.abs(dot([arch.frame.origin[0] - 1.5, arch.frame.origin[1], arch.frame.origin[2]], x)) < 1e-6); // 原点は正中矢状面上
+  assert.ok(r.cant > 1 && r.cant < 15);
+  alignArchFrame(arch, null);
+  assert.deepEqual(arch.frame.ez, ez0);
+});
+
 test('自動位置合わせ：スキャンと無関係な座標の CBCT に歯冠を合わせられる', async () => {
   const { makeDemoCBCT } = await import('../src/demo/demoCase.js');
   const { volumeThresholds } = await import('../src/geom/volstats.js');

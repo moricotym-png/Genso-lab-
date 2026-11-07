@@ -79,13 +79,28 @@ export function edt3d(occ, nx, ny, nz) {
   return out;
 }
 
+/** 2次元距離変換（occ=1 の画素までの距離、画素単位） */
+export function edt2d(occ, nx, ny) {
+  const INF = 1e20;
+  const g = new Float64Array(nx * ny);
+  for (let i = 0; i < g.length; i++) g[i] = occ[i] ? 0 : INF;
+  const mx = Math.max(nx, ny);
+  const f = new Float64Array(mx), d = new Float64Array(mx), v = new Int32Array(mx), z = new Float64Array(mx + 1);
+  for (let j = 0; j < ny; j++) { const b = j * nx; for (let q = 0; q < nx; q++) f[q] = g[b + q]; edt1d(f, nx, d, v, z); for (let q = 0; q < nx; q++) g[b + q] = d[q]; }
+  for (let i = 0; i < nx; i++) { for (let q = 0; q < ny; q++) f[q] = g[i + q * nx]; edt1d(f, ny, d, v, z); for (let q = 0; q < ny; q++) g[i + q * nx] = d[q]; }
+  const out = new Float32Array(g.length);
+  for (let i = 0; i < g.length; i++) out[i] = Math.sqrt(g[i]);
+  return out;
+}
+
 /**
  * @param input {
  *   groups: [{ positions: Float32Array, indices: Uint32Array }]  ワールド座標
  *   frame: { origin, ex, ey, ez }  ez = 咬合方向（アライナーの着脱方向）
  *   margins: Float32Array 3n  歯頸線の点（ワールド）
  *   teeth: [{ center:[x,y,z], thickness }]  部位別厚みの基準点
- *   params: { voxel, clearance, thickness, trimOffset, blockout, smooth, decimateError }
+ *   params: { voxel, clearance, thickness, trimOffset, blockout, blockoutDepth, smooth, decimateError }
+ *     blockoutDepth: null=ブロックアウトしない / 0=アンダーカットをすべて埋める / d=d mm までアンダーカットを残す
  * }
  */
 export function generateShell(input, progress = () => {}) {
@@ -200,13 +215,25 @@ export function generateShell(input, progress = () => {}) {
     }
     progress(0.05 + 0.15 * (gi + 1) / tris.length, '内外判定');
   }
-  if (prm.blockout) {
-    // アンダーカットを着脱方向に沿って完全にブロックアウト（最上面より下はすべて内側）
-    for (let c = 0; c < nCol; c++) {
-      if (topW[c] === -Infinity) continue;
-      const i = c % nx, j = (c / nx) | 0;
-      for (let k = 0; k < nz; k++) if (w0 + k * h < topW[c]) inside[i + nx * j + nCol * k] = 1;
+  // ブロックアウト量：null=しない、0=すべて埋める、d mm=アンダーカットへ d mm までは食い込ませる（維持力）
+  const bDepth = prm.blockoutDepth != null && prm.blockoutDepth !== '' ? Math.max(0, +prm.blockoutDepth) : (prm.blockout ? 0 : null);
+  if (bDepth != null) {
+    // 着脱方向（ez）に見た最上面より下＝サベイラインの内側。各高さの断面で、外（最上面より上の柱）からの水平距離が d を超える部分を埋める
+    const occ = new Uint8Array(nCol);
+    let filled = 0;
+    for (let k = 0; k < nz; k++) {
+      const w = w0 + k * h;
+      let any = false;
+      for (let c = 0; c < nCol; c++) { const b = w < topW[c]; occ[c] = b ? 0 : 1; if (b) any = true; }
+      if (!any) continue;
+      const dist = bDepth > 0 ? edt2d(occ, nx, ny) : null;
+      const base = nCol * k;
+      for (let c = 0; c < nCol; c++) {
+        if (occ[c] || inside[base + c]) continue;
+        if (!dist || (dist[c] - 0.5) * h > bDepth + 1e-6) { inside[base + c] = 1; filled++; }
+      }
     }
+    progress(0.22, `ブロックアウト ${bDepth === 0 ? 'すべて' : `${bDepth.toFixed(2)} mm 残し`}（${(filled * h ** 3).toFixed(1)} mm³）`);
   }
 
   // ---- 2) 狭帯域の正確な距離 ----
@@ -246,7 +273,7 @@ export function generateShell(input, progress = () => {}) {
   }
   progress(0.55, '距離場');
   let edtBlocked = null;
-  if (prm.blockout) edtBlocked = edt3d(inside, nx, ny, nz);
+  if (bDepth != null) edtBlocked = edt3d(inside, nx, ny, nz);
 
   // ---- 3) 部位別の厚みとトリム高さ（柱ごと） ----
   const thick = new Float32Array(nCol);

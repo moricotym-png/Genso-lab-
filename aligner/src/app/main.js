@@ -13,7 +13,7 @@ import { segmentTeeth, paintLabels, fillRegion, concavity, labelCounts, relabelF
 import { extractRoot } from '../geom/rootSeg.js';
 import { volumeIsosurface, smoothVolume, removeSmallParts } from '../geom/isosurface.js';
 import { poseMatrix, matrixToPose, attachmentMesh, buccalAnchor } from '../geom/tooth.js';
-import { buildArch, morphGingiva, refreshTooth, shellInput } from '../plan/arch.js';
+import { buildArch, morphGingiva, refreshTooth, shellInput, alignArchFrame } from '../plan/arch.js';
 import { archOrder, toothInfo, POSE_KEYS, POSE_LABELS, zeroPose, DEFAULT_LIMITS, positionOf } from '../plan/teeth.js';
 import { CEPH_LANDMARKS, CEPH_MEASURES, DEFAULT_TARGETS, measureCeph, cephToToothGoals } from '../plan/ceph.js';
 import { autoSetup, DEFAULT_SETUP, overjetOverbite, previewArchCurve, curveThrough } from '../plan/setup.js';
@@ -25,7 +25,7 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.15（ツール・レイヤーの追加）';
+export const APP_VERSION = 'v0.16（FH 平面・ブロックアウト量）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
@@ -683,7 +683,12 @@ const REF_POINTS = [
   { key: 'REAM', name: '右 外耳道中央' },
   { key: 'LEAM', name: '左 外耳道中央' },
   { key: 'N', name: 'N（ナジオン）' },
+  { key: 'RPo', name: '右 ポリオン（FH）' },
+  { key: 'LPo', name: '左 ポリオン（FH）' },
+  { key: 'ROr', name: '右 オルビターレ（FH）' },
+  { key: 'LOr', name: '左 オルビターレ（FH）' },
 ];
+const PLANE_JA = { camper: 'カンペル平面', fh: 'フランクフルト平面' };
 const SCAN_PRESETS = {
   upper: ['右上6 近心頬側咬頭頂', '右上3 尖頭', '上顎中切歯間 切縁', '左上3 尖頭', '左上6 近心頬側咬頭頂'],
   lower: ['右下6 近心頬側咬頭頂', '右下3 尖頭', '下顎中切歯間 切縁', '左下3 尖頭', '左下6 近心頬側咬頭頂'],
@@ -699,7 +704,7 @@ S.lm = {
   face: FACE_POINTS.map((name) => ({ name, cbct: null, face: null })),
   faceScan: FACE_SCAN_POINTS.map((name) => ({ name, scan: null, face: null })),
   faceMode: 'scan',
-  showPlanes: true, useFrame: false,
+  showPlanes: true, useFrame: false, plane: 'camper',
 };
 S.lmTarget = null; // { set: 'ref'|'scan'|'face', idx|key, side: 'cbct'|'scan'|'face' }
 
@@ -811,54 +816,107 @@ function lmPick(e) {
   renderLmTables();
 }
 
-// 基準平面（カンペル平面・正中矢状面）と患者座標系
-function refFrame() {
+// 基準平面（カンペル平面／フランクフルト平面・正中矢状面）と患者座標系
+// mode: 'camper' = ANS と左右外耳道中央 / 'fh' = 左右ポリオンとオルビターレ（左右あれば中点）
+function refFrame(mode = S.lm.plane) {
   const r = S.lm.ref;
-  if (!S.cbct || !r.ANS || !r.REAM || !r.LEAM) return null;
-  const A = cbctToWorld(r.ANS), R = cbctToWorld(r.REAM), L = cbctToWorld(r.LEAM);
-  const earMid = scale(add(R, L), 0.5);
-  let z = norm(cross(sub(L, A), sub(R, A)));
+  if (!S.cbct) return null;
+  const W = (k) => (r[k] ? cbctToWorld(r[k]) : null);
+  let R, L, front;
+  if (mode === 'fh') {
+    R = W('RPo'); L = W('LPo');
+    const ors = [W('ROr'), W('LOr')].filter(Boolean);
+    if (!R || !L || !ors.length) return null;
+    front = scale(ors.reduce((a, b) => add(a, b), [0, 0, 0]), 1 / ors.length);
+  } else {
+    R = W('REAM'); L = W('LEAM'); front = W('ANS');
+    if (!R || !L || !front) return null;
+  }
+  const pairMid = scale(add(R, L), 0.5);
+  let z = norm(cross(sub(L, front), sub(R, front)));
+  const Np = W('N'), Ap = W('ANS');
   // 上向き：N があれば N 側、なければ CT の頭側
-  const upHint = r.N ? sub(cbctToWorld(r.N), A) : sub(mApply(S.cbct.M, [0, 0, 100]), mApply(S.cbct.M, [0, 0, 0]));
+  const upHint = Np && dot(sub(Np, front), sub(Np, front)) > 1 ? sub(Np, pairMid) : sub(mApply(S.cbct.M, [0, 0, 100]), mApply(S.cbct.M, [0, 0, 0]));
   if (dot(z, upHint) < 0) z = scale(z, -1);
-  const midRef = r.N ? cbctToWorld(r.N) : earMid;
-  // 正中矢状面：カンペル平面の法線と、ANS→（N または外耳道中点）を含む面。その法線を左右軸にする
-  let x = norm(cross(sub(midRef, A), z));
-  if (dot(x, sub(L, R)) < 0) x = scale(x, -1); // x = 患者の左
+  // 正中矢状面：基準平面に垂直で、ANS と N（なければ左右の中点）を通る面。その法線を左右軸にする
+  const mids = [Ap, Np].filter(Boolean);
+  let A, x;
+  const LR = sub(L, R);
+  if (mids.length >= 1) {
+    A = mids[0];
+    const m2 = mids[1] && Math.hypot(...sub(mids[1], A)) > 5 ? mids[1] : pairMid;
+    x = cross(sub(m2, A), z);
+    if (Math.hypot(...x) < 1e-6) x = LR;
+  } else {
+    A = pairMid; x = LR; // 正中の点がなければ左右の点の垂直二等分面
+  }
+  x = norm(sub(x, scale(z, dot(x, z))));
+  if (dot(x, LR) < 0) x = scale(x, -1); // x = 患者の左
   const y = cross(z, x); // 後方（LPS 右手系）
   const F = [x[0], x[1], x[2], 0, y[0], y[1], y[2], 0, z[0], z[1], z[2], 0, A[0], A[1], A[2], 1];
   const angle = (u, v) => (Math.acos(Math.max(-1, Math.min(1, dot(norm(u), norm(v))))) * 180) / Math.PI;
-  return { F, A, R, L, x, y, z, earMid, earDist: Math.hypot(...sub(L, R)), asym: Math.abs(dot(sub(R, A), x) + dot(sub(L, A), x)) / 2, tilt: angle(z, upHint) };
+  return { mode, F, A, R, L, x, y, z, front, earMid: pairMid, earDist: Math.hypot(...LR), asym: Math.abs(dot(sub(R, A), x) + dot(sub(L, A), x)) / 2, tilt: angle(z, upHint), midFallback: mids.length < 2 };
 }
 function updateRefFrame() {
   viewer.clearGroup('refplanes');
-  const f = refFrame();
+  $('refPlane').value = S.lm.plane;
+  const fc = refFrame('camper'), ff = refFrame('fh');
+  const f = S.lm.plane === 'fh' ? ff : fc;
   if (!f) {
-    $('refStatus').textContent = 'ANS・左右外耳道中央の3点を打つとカンペル平面ができます。';
+    $('refStatus').textContent = S.lm.plane === 'fh'
+      ? '左右ポリオンとオルビターレ（片側でも可）を打つとフランクフルト平面ができます。正中には ANS と N を使います。'
+      : 'ANS・左右外耳道中央の3点を打つとカンペル平面ができます。';
     if (S.lm.useFrame) { S.lm.useFrame = false; viewer.setDisplayFrame(null); }
     $('useRefFrame').classList.remove('on');
+    applyArchRef();
     return;
   }
   if (S.lm.showPlanes) {
     const size = Math.max(90, f.earDist * 1.3);
-    const cC = add(scale(add(f.A, f.earMid), 0.5), [0, 0, 0]);
-    viewer.addPlane('refplanes', cC, f.z, size, 0x3b82f6, f.x);
-    viewer.addPlane('refplanes', cC, f.x, size, 0xef4444, f.y);
+    for (const [g, col] of [[fc, 0x3b82f6], [ff, 0x22c55e]]) {
+      if (!g) continue;
+      viewer.addPlane('refplanes', scale(add(g.front, g.earMid), 0.5), g.z, size, col, g.x);
+    }
+    viewer.addPlane('refplanes', scale(add(f.front, f.earMid), 0.5), f.x, size, 0xef4444, f.y);
   }
   $('showRefPlanes').classList.toggle('on', S.lm.showPlanes);
   $('useRefFrame').classList.toggle('on', S.lm.useFrame);
   if (S.lm.useFrame) viewer.setDisplayFrame(f.F);
-  $('refStatus').innerHTML = `カンペル平面（青）・正中矢状面（赤）を設定。外耳道中央の間隔 ${f.earDist.toFixed(1)} mm、正中からの左右差 ${f.asym.toFixed(1)} mm${S.lm.ref.N ? '' : '（N 未設定：外耳道の中点を正中に使用）'}`;
+  const both = fc && ff ? `　カンペル平面と FH の角度 ${((Math.acos(Math.min(1, Math.abs(dot(fc.z, ff.z)))) * 180) / Math.PI).toFixed(1)}°` : '';
+  $('refStatus').innerHTML = `${[fc && 'カンペル平面（青）', ff && 'フランクフルト平面（緑）'].filter(Boolean).join('・')}・正中矢状面（赤、${PLANE_JA[f.mode]}に垂直）を設定。左右の点の間隔 ${f.earDist.toFixed(1)} mm、正中からの左右差 ${f.asym.toFixed(1)} mm${f.midFallback ? '（ANS か N が未設定：左右の点の中点を正中に使用）' : ''}${both}`;
+  applyArchRef();
 }
+$('refPlane').onchange = () => { S.lm.plane = $('refPlane').value; updateRefFrame(); if (S.lm.useFrame) { viewer.fit(); viewer.view('front'); } };
 $('showRefPlanes').onclick = () => { S.lm.showPlanes = !S.lm.showPlanes; updateRefFrame(); };
 $('useRefFrame').onclick = () => {
-  if (!refFrame()) return alert('ANS と左右外耳道中央を先に指定してください');
+  if (!refFrame()) return alert(`${PLANE_JA[S.lm.plane]}の基準点を先に指定してください`);
   S.lm.useFrame = !S.lm.useFrame;
   if (!S.lm.useFrame) viewer.setDisplayFrame(null);
   updateRefFrame();
   viewer.fit();
   viewer.view('front');
 };
+// 排列の基準：歯列座標系の正中を正中矢状面に、左右の傾きを基準平面に合わせる
+S.archRef = 'none';
+function applyArchRef() {
+  const mode = S.archRef || 'none';
+  const rf = mode === 'none' ? null : refFrame(mode);
+  const msgs = [];
+  for (const j of JAWS) {
+    const arch = S.arches[j];
+    if (!arch) continue;
+    const r = alignArchFrame(arch, rf ? { x: rf.x, A: rf.A } : null);
+    if (r) msgs.push(`${JAW_JA[j]}: 左右の傾き補正 ${r.cant.toFixed(1)}°、正中の向き補正 ${r.yaw.toFixed(1)}°${r.midDev != null ? `、歯列の正中は正中矢状面から${Math.abs(r.midDev) < 0.05 ? 'ずれなし' : `患者の${r.midDev > 0 ? '左' : '右'}へ ${Math.abs(r.midDev).toFixed(1)} mm`}` : ''}`);
+  }
+  if ($('archRefStatus')) {
+    $('archRefStatus').innerHTML = mode === 'none' ? '歯列（歯冠の並び）から正中・咬合平面を推定しています。'
+      : !rf ? `${PLANE_JA[mode]}が未設定のため、歯列から推定しています（「2 位置合わせ」で基準点を打ってください）。`
+      : `正中＝正中矢状面、左右＝${PLANE_JA[mode]}。` + msgs.join('<br>') + '<br>変更後は「自動排列」をやり直してください。';
+    $('archRef').value = mode;
+  }
+  if (typeof drawGuides === 'function' && viewer) drawGuides();
+}
+$('archRef').onchange = () => { S.archRef = $('archRef').value; applyArchRef(); };
 
 // 対応点で合わせる
 function pairs(list, a, b) { return list.filter((q) => q[a] && q[b]); }
@@ -1169,6 +1227,7 @@ function buildTeethFor(j) {
   const prev = { teeth: new Map(Object.entries(S.toothProps).map(([k, v]) => [+k, v])) };
   S.arches[j] = buildArch(j, S.scans[j], S.labels[j], prev);
   for (const [fdi, t] of S.arches[j].teeth) { saveToothProps(t); if (S.cbctRoots[fdi]) t.cbctRoot = S.cbctRoots[fdi]; if (S.cbctTeeth[fdi]) t.cbctTooth = S.cbctTeeth[fdi]; }
+  if (S.archRef !== 'none') applyArchRef();
   drawArch(j);
   setVis('scan', false);
   $('segStatus').textContent = `${JAW_JA[j]}: 歯 ${S.arches[j].teeth.size} 本を作成（歯根は平均的な長さで推定。「4 歯軸・歯根」で調整）`;
@@ -2003,8 +2062,19 @@ $('play').onclick = () => {
 };
 
 // ------------------------------------------------------------------ アライナー出力
+const BLOCK_PRESETS = { none: null, tight: 0.4, std: 0.25, loose: 0.1, full: 0 };
+function blockoutDepth() {
+  const m = $('shBlock').value;
+  if (m === 'custom') { const v = parseFloat($('shBlockDepth').value); return Number.isFinite(v) ? Math.max(0, v) : 0.25; }
+  return BLOCK_PRESETS[m];
+}
+$('shBlock').onchange = () => {
+  const m = $('shBlock').value;
+  $('shBlockDepth').disabled = m !== 'custom';
+  if (m !== 'custom' && BLOCK_PRESETS[m] != null) $('shBlockDepth').value = BLOCK_PRESETS[m];
+};
 function shellParams() {
-  return { voxel: num('shVoxel'), clearance: num('shGap'), thickness: num('shT'), trimOffset: num('shTrim'), blockout: $('shBlock').checked, smooth: parseInt($('shSmooth').value, 10) || 0, decimateError: num('shDec') || 0, trimStyle: $('shTrimStyle').value };
+  return { voxel: num('shVoxel'), clearance: num('shGap'), thickness: num('shT'), trimOffset: num('shTrim'), blockoutDepth: blockoutDepth(), smooth: parseInt($('shSmooth').value, 10) || 0, decimateError: num('shDec') || 0, trimStyle: $('shTrimStyle').value };
 }
 function toothThickness(fdi) {
   if ($('shMode').value !== 'zone') return num('shT');
@@ -2104,7 +2174,7 @@ $('saveProject').onclick = () => {
     faceMatrix: S.face?.M || null, faceTex: S.face?.texURL || null,
     hasTeeth: { upper: !!S.arches.upper, lower: !!S.arches.lower },
     limits: readLimits(), shell: shellParams(),
-    landmarks: { ref: S.lm.ref, scan: S.lm.scan, face: S.lm.face, faceScan: S.lm.faceScan, faceMode: S.lm.faceMode, useFrame: S.lm.useFrame, showPlanes: S.lm.showPlanes },
+    landmarks: { ref: S.lm.ref, scan: S.lm.scan, face: S.lm.face, faceScan: S.lm.faceScan, faceMode: S.lm.faceMode, useFrame: S.lm.useFrame, showPlanes: S.lm.showPlanes, plane: S.lm.plane }, archRef: S.archRef,
   };
   files.push({ name: 'project.json', data: JSON.stringify(proj) });
   for (const j of JAWS) {
@@ -2148,7 +2218,9 @@ $('openProject').onchange = (e) => e.target.files[0] && withBusy('プロジェ�
   if (zip.get('face.obj')) { S.face = { M: proj.faceMatrix }; await loadFace(new TextDecoder().decode(zip.get('face.obj')), proj.faceTex); }
   if (proj.cbctMatrix) { S.pendingCbctMatrix = proj.cbctMatrix; log('CBCT の位置合わせ情報があります。DICOM を読み込むと復元されます'); }
   if (proj.caseId) $('caseId').value = proj.caseId;
+  if (proj.archRef) S.archRef = proj.archRef;
   if (proj.landmarks) { Object.assign(S.lm, proj.landmarks); renderLmTables(); }
+  applyArchRef();
   loadSetupForm();
   afterPlanChange(true);
   viewer.fit();

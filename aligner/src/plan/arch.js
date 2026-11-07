@@ -93,6 +93,39 @@ export function buildArch(jaw, scan, labels, prev = null) {
   return arch;
 }
 
+/**
+ * 歯列座標系を頭部の基準に合わせる
+ * ref = { x: 患者の左右軸（基準平面の左右方向＝正中矢状面の法線）, A: 正中矢状面上の点 } / null で元に戻す
+ * 左右の傾き（カント）を基準平面にそろえ、正中（x=0）を正中矢状面に置く。前後の傾き（咬合平面角）は歯列のまま
+ */
+export function alignArchFrame(arch, ref) {
+  const F = arch.frame;
+  if (!arch.frame0) arch.frame0 = { origin: [...F.origin], ex: [...F.ex], ey: [...F.ey], ez: [...F.ez], curve: F.curve };
+  const F0 = arch.frame0;
+  arch._contactBase = null;
+  if (!ref) {
+    Object.assign(F, { origin: [...F0.origin], ex: [...F0.ex], ey: [...F0.ey], ez: [...F0.ez], curve: F0.curve });
+    arch.refAligned = null;
+    return null;
+  }
+  const x = norm(ref.x);
+  const ez = norm(sub(F0.ez, scale(x, dot(F0.ez, x))));
+  const ex = dot(x, F0.ex) >= 0 ? x : scale(x, -1);
+  const ey = cross(ez, ex);
+  let origin = sub(F0.origin, scale(x, dot(sub(F0.origin, ref.A), x)));
+  const nf = { origin, ex, ey, ez };
+  const occl = [...arch.teeth.values()].map((t) => toArchLocal(nf, t.occlusalPoint)[2]);
+  origin = add(origin, scale(ez, occl.reduce((a, b) => a + b, 0) / Math.max(1, occl.length)));
+  Object.assign(F, { origin, ex, ey, ez });
+  F.curve = fitArch([...arch.teeth.values()].map((t) => { const l = toArchLocal(F, t.centroid); return [l[0], l[1]]; }));
+  const ang = (u, v) => (Math.acos(Math.max(-1, Math.min(1, dot(u, v)))) * 180) / Math.PI;
+  // 歯列の正中（中切歯の間）と正中矢状面の差
+  const cs = [...arch.teeth.values()].filter((t) => positionOf(t.fdi) === 1);
+  const midDev = cs.length ? cs.reduce((a, t) => a + dot(sub(t.centroid, ref.A), x), 0) / cs.length : null;
+  arch.refAligned = { cant: ang(ez, F0.ez), yaw: ang(ex, norm(sub(F0.ex, scale(ez, dot(F0.ex, ez))))), midDev };
+  return arch.refAligned;
+}
+
 /** 歯肉シート：各頂点に「どの歯にどれだけ追従するか」の重みを付ける */
 export function buildGingiva(arch, ging, sigma = 2.5) {
   const teeth = arch.teeth;
