@@ -132,7 +132,7 @@ export function buildGingiva(arch, ging, sigma = 2.5) {
     const arr = [...best.entries()].sort((a, b) => a[1] - b[1]).slice(0, 2);
     arr.forEach(([fdi, d], k) => { wTooth[2 * i + k] = fdi; wVal[2 * i + k] = Math.exp(-((d / sigma) ** 2)); });
   }
-  return { mesh, wTooth, wVal, capCount: nv - nv0 };
+  return { mesh, wTooth, wVal, capCount: nv - nv0, fromOld: ging.fromOld };
 }
 
 /** 歯肉を各歯の変換に追従させた位置 */

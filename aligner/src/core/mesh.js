@@ -341,3 +341,32 @@ export function taubinSmooth(mesh, iterations = 5, lambda = 0.5, mu = -0.53, fix
   mesh.invalidate();
   return mesh;
 }
+
+/** 位置が同じ頂点を1つにまとめる（PLY/OBJ 用）。色は平均する */
+export function weldIndexed(positions, indices, colors = null, tol = 1e-4) {
+  const inv = 1 / tol;
+  const map = new Map();
+  const remap = new Uint32Array(positions.length / 3);
+  const P = [], C = [], cnt = [];
+  for (let i = 0; i < positions.length / 3; i++) {
+    const key = `${Math.round(positions[3 * i] * inv)},${Math.round(positions[3 * i + 1] * inv)},${Math.round(positions[3 * i + 2] * inv)}`;
+    let id = map.get(key);
+    if (id === undefined) {
+      id = P.length / 3; map.set(key, id);
+      P.push(positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]);
+      if (colors) C.push(0, 0, 0);
+      cnt.push(0);
+    }
+    if (colors) { C[3 * id] += colors[3 * i]; C[3 * id + 1] += colors[3 * i + 1]; C[3 * id + 2] += colors[3 * i + 2]; }
+    cnt[id]++;
+    remap[i] = id;
+  }
+  const I = [];
+  for (let f = 0; f < indices.length; f += 3) {
+    const a = remap[indices[f]], b = remap[indices[f + 1]], c = remap[indices[f + 2]];
+    if (a !== b && b !== c && a !== c) I.push(a, b, c);
+  }
+  let col = null;
+  if (colors) { col = Float32Array.from(C); for (let i = 0; i < cnt.length; i++) { col[3 * i] /= cnt[i]; col[3 * i + 1] /= cnt[i]; col[3 * i + 2] /= cnt[i]; } }
+  return { mesh: new Mesh(Float32Array.from(P), Uint32Array.from(I)), colors: col };
+}

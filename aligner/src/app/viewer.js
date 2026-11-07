@@ -35,8 +35,13 @@ export class Viewer {
     this.camera.up.set(0, 0, 1);
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.6));
-    const d1 = new THREE.DirectionalLight(0xffffff, 1.4); d1.position.set(60, -80, 120); this.camera.add(d1);
+    // 照明：環境光は控えめにし、斜め上からの主光源＋反対側からの補助光で凹凸を出す
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4250, 0.55));
+    const key = new THREE.DirectionalLight(0xffffff, 2.4); key.position.set(-40, 60, 80); this.camera.add(key);
+    const fill = new THREE.DirectionalLight(0xdfe8ff, 0.7); fill.position.set(60, -20, 40); this.camera.add(fill);
+    const rim = new THREE.DirectionalLight(0xffffff, 0.5); rim.position.set(0, 40, -80); this.camera.add(rim);
     this.scene.add(this.camera);
     this.root = new THREE.Group();
     this.scene.add(this.root);
@@ -100,7 +105,7 @@ export class Viewer {
     const mat = new THREE.MeshStandardMaterial({
       color: opts.color ?? 0xdddddd,
       vertexColors: !!opts.colors,
-      roughness: opts.roughness ?? 0.55,
+      roughness: opts.roughness ?? 0.42,
       metalness: 0,
       transparent: (opts.opacity ?? 1) < 1,
       opacity: opts.opacity ?? 1,

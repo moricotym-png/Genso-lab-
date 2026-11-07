@@ -1,6 +1,7 @@
 // Aligner Studio — 画面とワークフロー
 import { Viewer, LABEL_COLORS, makeSliceMesh, meshToGeometry, makeVolumeMesh, THREE } from './viewer.js';
-import { Mesh, mergeMeshes } from '../core/mesh.js';
+import { Mesh, mergeMeshes, weldIndexed } from '../core/mesh.js';
+import { parsePLY } from '../io/ply.js';
 import { mApply, mMul, mInvRigid, mTranslate, mIdentity, sub, add, scale, dot, norm, cross } from '../core/vec.js';
 import { parseSTL, writeSTL } from '../io/stl.js';
 import { parseOBJ } from '../io/obj.js';
@@ -23,13 +24,16 @@ const $ = (id) => document.getElementById(id);
 const JAWS = ['upper', 'lower'];
 const JAW_JA = { upper: '上顎', lower: '下顎' };
 const STORE_VERSION = 1;
-export const APP_VERSION = 'v0.8（歯根の自動抽出）';
+export const APP_VERSION = 'v0.9（表示の改善・色付きスキャン）';
 $('appVersion').textContent = APP_VERSION;
 
 // ------------------------------------------------------------------ 状態
 const S = {
   scans: { upper: null, lower: null },
   scanBuf: { upper: null, lower: null },
+  scanExt: { upper: 'stl', lower: 'stl' },
+  scanColors: { upper: null, lower: null },
+  scanShade: { upper: null, lower: null },
   labels: { upper: null, lower: null },
   seeds: { upper: [], lower: [] },
   arches: { upper: null, lower: null },
@@ -140,22 +144,29 @@ const setVis = (k, v) => { S.vis[k] = v; const b = document.querySelector(`[data
 
 // ------------------------------------------------------------------ 取込
 async function loadScan(jaw, buf, name = '') {
-  const mesh = parseSTL(buf);
+  const ext = (name.match(/\.(\w+)$/)?.[1] || 'stl').toLowerCase();
+  let mesh, colors = null;
+  if (ext === 'ply') { const r = parsePLY(buf); ({ mesh, colors } = weldIndexed(r.positions, r.indices, r.colors)); }
+  else if (ext === 'obj') { const r = parseOBJ(new TextDecoder().decode(new Uint8Array(buf))); ({ mesh, colors } = weldIndexed(r.positions, r.indices, r.colors)); }
+  else mesh = parseSTL(buf);
   S.scans[jaw] = mesh;
   S.scanBuf[jaw] = buf;
+  S.scanExt[jaw] = ext;
+  S.scanColors[jaw] = colors;
+  S.scanShade[jaw] = curvatureShade(mesh);
   S.labels[jaw] = null;
   S.seeds[jaw] = [];
   S.arches[jaw] = null;
   S.plan[jaw] = null;
   drawScan(jaw);
   updateScanStatus();
-  log(`${JAW_JA[jaw]}スキャン ${name} を読み込み（${mesh.nf.toLocaleString()} 面）`);
+  log(`${JAW_JA[jaw]}スキャン ${name} を読み込み（${mesh.nf.toLocaleString()} 面${colors ? '・色あり' : ''}）`);
 }
 function updateScanStatus() {
   $('statusScan').textContent = JAWS.map((j) => `${JAW_JA[j]}: ${S.scans[j] ? `${S.scans[j].nf.toLocaleString()} 面` : '未読込'}`).join(' / ');
 }
-$('fileUpper').onchange = (e) => e.target.files[0] && withBusy('STL 読込中…', async () => { await loadScan('upper', await readFile(e.target.files[0]), e.target.files[0].name); viewer.fit(); });
-$('fileLower').onchange = (e) => e.target.files[0] && withBusy('STL 読込中…', async () => { await loadScan('lower', await readFile(e.target.files[0]), e.target.files[0].name); viewer.fit(); });
+$('fileUpper').onchange = (e) => e.target.files[0] && withBusy('スキャン読込中…', async () => { await loadScan('upper', await readFile(e.target.files[0]), e.target.files[0].name); viewer.fit(); });
+$('fileLower').onchange = (e) => e.target.files[0] && withBusy('スキャン読込中…', async () => { await loadScan('lower', await readFile(e.target.files[0]), e.target.files[0].name); viewer.fit(); });
 
 async function loadDicomFiles(files, { autoAlign = false } = {}) {
   const list = [...files].filter((f) => !/\.(txt|xml|jpg|png|html?)$/i.test(f.name));
@@ -396,12 +407,39 @@ function nearestVertex(mesh, p) {
 }
 
 // ------------------------------------------------------------------ 描画
+/** 曲率による陰影係数（くぼみを暗く、とがりを少し明るく）。裂溝・咬頭・歯頸線が見やすくなる */
+function curvatureShade(mesh) {
+  const K = mesh.curvature(1);
+  const a = [];
+  for (let i = 0; i < K.length; i += Math.max(1, Math.floor(K.length / 20000))) a.push(Math.abs(K[i]));
+  a.sort((x, y) => x - y);
+  const sc = a[Math.floor(a.length * 0.9)] || 1;
+  const f = new Float32Array(K.length);
+  for (let i = 0; i < K.length; i++) f[i] = Math.max(0.45, Math.min(1.15, 1 + 0.4 * (K[i] / sc)));
+  return f;
+}
+const IVORY = [0.93, 0.91, 0.86], GUM = [0.88, 0.6, 0.6];
+/** スキャンの頂点 i の基本色（色付きスキャンならその色） */
+const scanBase = (jaw, i, fallback = IVORY) => { const C = S.scanColors[jaw]; return C ? [C[3 * i], C[3 * i + 1], C[3 * i + 2]] : fallback; };
 function labelColors(jaw) {
-  const mesh = S.scans[jaw], L = S.labels[jaw];
+  const mesh = S.scans[jaw], L = S.labels[jaw], sh = S.scanShade[jaw];
   const C = new Float32Array(mesh.nv * 3);
+  const hasCol = !!S.scanColors[jaw];
   for (let i = 0; i < mesh.nv; i++) {
-    const c = L ? LABEL_COLORS.get(L[i]) || [0.8, 0.8, 0.8] : [0.88, 0.86, 0.82];
-    C[3 * i] = c[0]; C[3 * i + 1] = c[1]; C[3 * i + 2] = c[2];
+    let c = scanBase(jaw, i);
+    if (L) { const lc = LABEL_COLORS.get(L[i]) || [0.8, 0.8, 0.8]; c = hasCol ? c.map((x, k) => x * 0.45 + lc[k] * 0.55) : lc; }
+    const f = sh ? sh[i] : 1;
+    C[3 * i] = c[0] * f; C[3 * i + 1] = c[1] * f; C[3 * i + 2] = c[2] * f;
+  }
+  return C;
+}
+/** 部分メッシュ（歯冠・歯肉）の頂点色：元のスキャンの色と陰影を引き継ぐ */
+function subColors(jaw, fromOld, fallback) {
+  const sh = S.scanShade[jaw];
+  const C = new Float32Array(fromOld.length * 3);
+  for (let i = 0; i < fromOld.length; i++) {
+    const o = fromOld[i], c = scanBase(jaw, o, fallback), f = sh ? sh[o] : 1;
+    C[3 * i] = c[0] * f; C[3 * i + 1] = c[1] * f; C[3 * i + 2] = c[2] * f;
   }
   return C;
 }
@@ -434,7 +472,7 @@ function drawArch(jaw) {
   const arch = S.arches[jaw];
   if (!arch) return;
   for (const [fdi, t] of arch.teeth) {
-    const crown = viewer.addMesh(`teeth_${jaw}`, t.crown, { color: fdi === S.sel ? COL.crownSel : COL.crown, userData: { fdi, jaw } });
+    const crown = viewer.addMesh(`teeth_${jaw}`, t.crown, { color: fdi === S.sel ? COL.crownSel : 0xffffff, colors: t.crown.fromOld ? subColors(jaw, t.crown.fromOld, IVORY) : null, userData: { fdi, jaw, vc: !!t.crown.fromOld } });
     crown.matrixAutoUpdate = false;
     const rootIdx = t.mesh.indices.subarray(t.rootFaceStart * 3);
     const root = t.cbctRoot
@@ -446,7 +484,7 @@ function drawArch(jaw) {
       a.matrixAutoUpdate = false;
     }
   }
-  const g = viewer.addMesh(`ging_${jaw}`, arch.gingiva.mesh, { color: COL.ging, opacity: 0.85, doubleSide: true, userData: { ging: jaw } });
+  const g = viewer.addMesh(`ging_${jaw}`, arch.gingiva.mesh, { color: 0xffffff, colors: arch.gingiva.fromOld ? subColors(jaw, arch.gingiva.fromOld, GUM) : null, opacity: 0.9, doubleSide: true, userData: { ging: jaw } });
   g.userData.base = arch.gingiva.mesh;
   updatePoses();
   applyVisibility();
@@ -467,7 +505,7 @@ function updatePoses() {
     for (const c of viewer.group(`teeth_${jaw}`).children) {
       const M = mats.get(c.userData.fdi);
       if (M) { c.matrix.fromArray(M); c.matrixWorldNeedsUpdate = true; }
-      if (!c.userData.root && !c.userData.att) c.material.color.setHex(c.userData.fdi === S.sel ? COL.crownSel : COL.crown);
+      if (!c.userData.root && !c.userData.att) c.material.color.setHex(c.userData.fdi === S.sel ? COL.crownSel : c.userData.vc ? 0xffffff : COL.crown);
     }
     const gm = viewer.group(`ging_${jaw}`).children[0];
     if (gm) {
@@ -1640,7 +1678,7 @@ $('saveProject').onclick = () => {
   };
   files.push({ name: 'project.json', data: JSON.stringify(proj) });
   for (const j of JAWS) {
-    if (S.scanBuf[j]) files.push({ name: `${j}.stl`, data: S.scanBuf[j] });
+    if (S.scanBuf[j]) files.push({ name: `${j}.${S.scanExt[j] || 'stl'}`, data: S.scanBuf[j] });
     if (S.labels[j]) files.push({ name: `labels_${j}.bin`, data: new Uint8Array(S.labels[j].buffer.slice(0)) });
   }
   if (S.face) files.push({ name: 'face.obj', data: S.face.text });
@@ -1656,9 +1694,10 @@ $('openProject').onchange = (e) => e.target.files[0] && withBusy('プロジェ�
   S.cbctRoots = {};
   for (const [name, data] of zip) { const mm = name.match(/^roots\/(\d+)\.stl$/); if (mm) S.cbctRoots[+mm[1]] = parseSTL(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)); }
   for (const j of JAWS) {
-    const stl = zip.get(`${j}.stl`);
-    if (!stl) continue;
-    await loadScan(j, stl.buffer.slice(stl.byteOffset, stl.byteOffset + stl.byteLength), `${j}.stl`);
+    const ext = ['stl', 'ply', 'obj'].find((x) => zip.get(`${j}.${x}`));
+    if (!ext) continue;
+    const stl = zip.get(`${j}.${ext}`);
+    await loadScan(j, stl.buffer.slice(stl.byteOffset, stl.byteOffset + stl.byteLength), `${j}.${ext}`);
     S.seeds[j] = proj.seeds?.[j] || [];
     const lb = zip.get(`labels_${j}.bin`);
     if (lb) { S.labels[j] = new Int32Array(lb.buffer.slice(lb.byteOffset, lb.byteOffset + lb.byteLength)); refreshScanColors(j); }

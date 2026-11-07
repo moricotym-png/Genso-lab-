@@ -186,3 +186,23 @@ test('自動位置合わせ：スキャンと無関係な座標の CBCT に歯�
     assert.ok(Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 0.3, `error at ${p}`);
   }
 });
+
+test('PLY（バイナリ・頂点カラー）を読み、頂点を溶接できる', async () => {
+  const { parsePLY } = await import('../src/io/ply.js');
+  const { weldIndexed } = await import('../src/core/mesh.js');
+  const head = 'ply\nformat binary_little_endian 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nelement face 2\nproperty list uchar int vertex_indices\nend_header\n';
+  const hb = new TextEncoder().encode(head);
+  const buf = new ArrayBuffer(hb.length + 4 * 15 + 2 * 13);
+  new Uint8Array(buf).set(hb);
+  const dv = new DataView(buf);
+  let o = hb.length;
+  const V = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 0, 0]];
+  for (const v of V) { for (const x of v) { dv.setFloat32(o, x, true); o += 4; } dv.setUint8(o++, 255); dv.setUint8(o++, 128); dv.setUint8(o++, 0); }
+  for (const f of [[0, 1, 2], [3, 2, 1]]) { dv.setUint8(o++, 3); for (const i of f) { dv.setInt32(o, i, true); o += 4; } }
+  const r = parsePLY(buf);
+  assert.equal(r.positions.length, 12);
+  assert.equal(r.indices.length, 6);
+  assert.ok(Math.abs(r.colors[0] - 1) < 1e-6 && Math.abs(r.colors[1] - 128 / 255) < 1e-6);
+  const w = weldIndexed(r.positions, r.indices, r.colors);
+  assert.equal(w.mesh.nv, 3); // 0 と 3 は同じ位置
+});

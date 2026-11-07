@@ -108,9 +108,9 @@
     </nav>
 
     <section class="step on" id="step-import">
-      <h2>口腔内スキャン（STL）</h2>
-      <label class="btn file">上顎 STL を選ぶ<input type="file" id="fileUpper" accept=".stl"></label>
-      <label class="btn file">下顎 STL を選ぶ<input type="file" id="fileLower" accept=".stl"></label>
+      <h2>口腔内スキャン（STL / PLY / OBJ）</h2>
+      <label class="btn file">上顎スキャン（STL / 色付き PLY・OBJ）<input type="file" id="fileUpper" accept=".stl,.ply,.obj"></label>
+      <label class="btn file">下顎スキャン（STL / 色付き PLY・OBJ）<input type="file" id="fileLower" accept=".stl,.ply,.obj"></label>
       <div class="status" id="statusScan">未読込</div>
       <p class="note">上下顎は口腔内スキャナーから咬合位のまま書き出したもの（同じ座標系）を使ってください。単位は mm。</p>
       <h2>CT / CBCT（DICOM）</h2>
